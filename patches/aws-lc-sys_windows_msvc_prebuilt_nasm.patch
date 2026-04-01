@@ -1,13 +1,53 @@
+diff --git a/builder/cc_builder.rs b/builder/cc_builder.rs
+index 95cacb048..3e95db04a 100644
+--- a/builder/cc_builder.rs
++++ b/builder/cc_builder.rs
+@@ -20,9 +20,10 @@ mod win_x86_64;
+ use crate::nasm_builder::NasmBuilder;
+ use crate::{
+     cargo_env, disable_jitter_entropy, emit_warning, env_name_for_target, env_var_to_bool,
+-    execute_command, get_crate_cc, get_crate_cflags, get_crate_cxx, is_no_asm, out_dir,
+-    requested_c_std, set_env_for_target, target, target_arch, target_env, target_os, target_vendor,
+-    test_clang_cl_command, CStdRequested, EnvGuard, OutputLibType,
++    execute_command, get_crate_cc, get_crate_cflags, get_crate_cxx,
++    is_bazel_windows_msvc_build_script, is_no_asm, out_dir, requested_c_std, set_env_for_target,
++    target, target_arch, target_env, target_os, target_vendor, test_clang_cl_command,
++    CStdRequested, EnvGuard, OutputLibType,
+ };
+ use std::cell::Cell;
+ use std::collections::HashMap;
+@@ -788,13 +789,17 @@ impl crate::Builder for CcBuilder {
+     }
+ 
+     fn build(&self) -> Result<(), String> {
+-        if target_os() == "windows"
+-            && target_arch() == "aarch64"
++        let should_use_clang_cl = target_os() == "windows"
+             && target_env() == "msvc"
+-            && get_crate_cc().is_none()
+             && test_clang_cl_command()
+-        {
+-            set_env_for_target("CC", "clang-cl");
++            && (target_arch() == "aarch64" || is_bazel_windows_msvc_build_script());
++        if should_use_clang_cl {
++            if get_crate_cc().is_none() {
++                set_env_for_target("CC", "clang-cl");
++            }
++            if get_crate_cxx().is_none() {
++                set_env_for_target("CXX", "clang-cl");
++            }
+         }
+ 
+         println!("cargo:root={}", self.out_dir.display());
 diff --git a/builder/main.rs b/builder/main.rs
+index 51a9bc1c9..49eb277c0 100644
 --- a/builder/main.rs
 +++ b/builder/main.rs
-@@ -721,16 +721,29 @@
- fn get_crate_cflags() -> Option<String> {
-     optional_env_optional_crate_target("TARGET_CFLAGS")
+@@ -723,14 +723,27 @@ fn get_crate_cflags() -> Option<String> {
          .or(optional_env_optional_crate_target("CFLAGS"))
-+}
-+
-+fn is_bazel_windows_msvc_build_script() -> bool {
+ }
+ 
++pub(crate) fn is_bazel_windows_msvc_build_script() -> bool {
 +    if !target().ends_with("windows-msvc") {
 +        return false;
 +    }
@@ -17,8 +57,8 @@ diff --git a/builder/main.rs b/builder/main.rs
 +    manifest_dir
 +        .components()
 +        .any(|component| component.as_os_str() == "bazel-out")
- }
- 
++}
++
  fn use_prebuilt_nasm() -> bool {
 +    let use_prebuilt_for_bazel_windows_msvc = is_bazel_windows_msvc_build_script();
      target_os() == "windows"
@@ -34,6 +74,7 @@ diff --git a/builder/main.rs b/builder/main.rs
  
  fn allow_prebuilt_nasm() -> Option<bool> {
 diff --git a/builder/nasm_builder.rs b/builder/nasm_builder.rs
+index cf1f5c849..f68327416 100644
 --- a/builder/nasm_builder.rs
 +++ b/builder/nasm_builder.rs
 @@ -57,7 +57,7 @@
