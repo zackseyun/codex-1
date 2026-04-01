@@ -1,11 +1,10 @@
 ---
-source: tui/src/chatwidget/tests.rs
+source: tui/src/chatwidget/tests/exec_flow.rs
 expression: snapshot
 ---
 History:
 • Ran echo repro-marker
-  └ repro-marker
 
 Active:
-• Exploring
-  └ Read null
+• Inspecting file
+  └ null

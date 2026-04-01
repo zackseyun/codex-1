@@ -11,12 +11,10 @@ use crate::render::line_utils::push_owned_lines;
 use crate::shimmer::shimmer_spans;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_line;
-use crate::wrapping::adaptive_wrap_lines;
 use codex_ansi_escape::ansi_escape_line;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_shell_command::bash::extract_bash_command;
-use codex_utils_elapsed::format_duration;
 use itertools::Itertools;
 use ratatui::prelude::*;
 use ratatui::style::Modifier;
@@ -29,6 +27,7 @@ use unicode_width::UnicodeWidthStr;
 pub(crate) const TOOL_CALL_MAX_LINES: usize = 5;
 const USER_SHELL_TOOL_CALL_MAX_LINES: usize = 50;
 const MAX_INTERACTION_PREVIEW_CHARS: usize = 80;
+const SEMANTIC_ITEM_PREVIEW_LIMIT: usize = 3;
 
 pub(crate) struct OutputLinesParams {
     pub(crate) line_limit: usize,
@@ -88,6 +87,145 @@ fn summarize_interaction_input(input: &str) -> String {
     }
     preview.push_str("...");
     preview
+}
+
+#[derive(Debug, Clone)]
+struct SemanticSummary {
+    title: String,
+    detail: Option<String>,
+}
+
+fn summarize_item_list<I>(items: I) -> Option<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut items: Vec<String> = items
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .unique()
+        .collect();
+
+    if items.is_empty() {
+        return None;
+    }
+
+    let remaining = items.len().saturating_sub(SEMANTIC_ITEM_PREVIEW_LIMIT);
+    items.truncate(SEMANTIC_ITEM_PREVIEW_LIMIT);
+
+    let mut summary = items.join(", ");
+    if remaining > 0 {
+        summary.push_str(&format!(" +{remaining} more"));
+    }
+    Some(summary)
+}
+
+fn summarize_searches(searches: &[(Option<String>, Option<String>)]) -> Option<String> {
+    match searches {
+        [] => None,
+        [(query, path)] => match (query.as_deref(), path.as_deref()) {
+            (Some(query), Some(path)) => Some(format!("for {query} in {path}")),
+            (Some(query), None) => Some(format!("for {query}")),
+            (None, Some(path)) => Some(format!("in {path}")),
+            (None, None) => Some("across the workspace".to_string()),
+        },
+        _ => Some(format!("{} lookups across the workspace", searches.len())),
+    }
+}
+
+fn semantic_summary_for_parsed_commands(
+    parsed: &[ParsedCommand],
+    exploring: bool,
+) -> SemanticSummary {
+    let reads: Vec<String> = parsed
+        .iter()
+        .filter_map(|command| match command {
+            ParsedCommand::Read { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+
+    let lists: Vec<String> = parsed
+        .iter()
+        .filter_map(|command| match command {
+            ParsedCommand::ListFiles { path, .. } => Some(
+                path.clone()
+                    .unwrap_or_else(|| "current directory".to_string()),
+            ),
+            _ => None,
+        })
+        .collect();
+
+    let searches: Vec<(Option<String>, Option<String>)> = parsed
+        .iter()
+        .filter_map(|command| match command {
+            ParsedCommand::Search { query, path, .. } => Some((query.clone(), path.clone())),
+            _ => None,
+        })
+        .collect();
+
+    let unknown_count = parsed
+        .iter()
+        .filter(|command| matches!(command, ParsedCommand::Unknown { .. }))
+        .count();
+
+    if !reads.is_empty() && lists.is_empty() && searches.is_empty() && unknown_count == 0 {
+        return SemanticSummary {
+            title: if reads.len() == 1 {
+                "Inspecting file".to_string()
+            } else {
+                "Inspecting files".to_string()
+            },
+            detail: summarize_item_list(reads),
+        };
+    }
+
+    if reads.is_empty() && !lists.is_empty() && searches.is_empty() && unknown_count == 0 {
+        return SemanticSummary {
+            title: if lists.len() == 1 {
+                "Inspecting directory".to_string()
+            } else {
+                "Inspecting directories".to_string()
+            },
+            detail: summarize_item_list(lists),
+        };
+    }
+
+    if reads.is_empty() && lists.is_empty() && !searches.is_empty() && unknown_count == 0 {
+        return SemanticSummary {
+            title: "Searching code".to_string(),
+            detail: summarize_searches(&searches),
+        };
+    }
+
+    let mut detail_parts = Vec::new();
+    if let Some(files) = summarize_item_list(reads) {
+        detail_parts.push(format!("files: {files}"));
+    }
+    if let Some(directories) = summarize_item_list(lists) {
+        detail_parts.push(format!("folders: {directories}"));
+    }
+    if let Some(search_summary) = summarize_searches(&searches) {
+        detail_parts.push(format!("search: {search_summary}"));
+    }
+    if unknown_count > 0 {
+        detail_parts.push(format!(
+            "shell tasks: {unknown_count} {}",
+            if unknown_count == 1 { "step" } else { "steps" }
+        ));
+    }
+
+    SemanticSummary {
+        title: if exploring {
+            "Inspecting project context".to_string()
+        } else {
+            "Running shell task".to_string()
+        },
+        detail: if detail_parts.is_empty() {
+            None
+        } else {
+            Some(detail_parts.join(" • "))
+        },
+    }
 }
 
 #[derive(Clone)]
@@ -205,52 +343,19 @@ impl HistoryCell for ExecCell {
     }
 
     fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut lines: Vec<Line<'static>> = vec![];
-        for (i, call) in self.iter_calls().enumerate() {
-            if i > 0 {
-                lines.push("".into());
-            }
-            let script = strip_bash_lc_and_escape(&call.command);
-            let highlighted_script = highlight_bash_to_lines(&script);
-            let cmd_display = adaptive_wrap_lines(
-                &highlighted_script,
-                RtOptions::new(width as usize)
-                    .initial_indent("$ ".magenta().into())
-                    .subsequent_indent("    ".into()),
-            );
-            lines.extend(cmd_display);
-
-            if let Some(output) = call.output.as_ref() {
-                if !call.is_unified_exec_interaction() {
-                    let wrap_width = width.max(1) as usize;
-                    let wrap_opts = RtOptions::new(wrap_width);
-                    for unwrapped in output.formatted_output.lines().map(ansi_escape_line) {
-                        let wrapped = adaptive_wrap_line(&unwrapped, wrap_opts.clone());
-                        push_owned_lines(&wrapped, &mut lines);
-                    }
-                }
-                let duration = call
-                    .duration
-                    .map(format_duration)
-                    .unwrap_or_else(|| "unknown".to_string());
-                let mut result: Line = if output.exit_code == 0 {
-                    Line::from("✓".green().bold())
-                } else {
-                    Line::from(vec![
-                        "✗".red().bold(),
-                        format!(" ({})", output.exit_code).into(),
-                    ])
-                };
-                result.push_span(format!(" • {duration}").dim());
-                lines.push(result);
-            }
-        }
-        lines
+        self.display_lines(width)
     }
 }
 
 impl ExecCell {
     fn exploring_display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let parsed_commands: Vec<ParsedCommand> = self
+            .calls
+            .iter()
+            .flat_map(|call| call.parsed.clone())
+            .collect();
+        let summary =
+            semantic_summary_for_parsed_commands(&parsed_commands, /*exploring*/ true);
         let mut out: Vec<Line<'static>> = Vec::new();
         out.push(Line::from(vec![
             if self.is_active() {
@@ -259,97 +364,21 @@ impl ExecCell {
                 "•".dim()
             },
             " ".into(),
-            if self.is_active() {
-                "Exploring".bold()
-            } else {
-                "Explored".bold()
-            },
+            summary.title.bold(),
         ]));
 
-        let mut calls = self.calls.clone();
-        let mut out_indented = Vec::new();
-        while !calls.is_empty() {
-            let mut call = calls.remove(0);
-            if call
-                .parsed
-                .iter()
-                .all(|parsed| matches!(parsed, ParsedCommand::Read { .. }))
-            {
-                while let Some(next) = calls.first() {
-                    if next
-                        .parsed
-                        .iter()
-                        .all(|parsed| matches!(parsed, ParsedCommand::Read { .. }))
-                    {
-                        call.parsed.extend(next.parsed.clone());
-                        calls.remove(0);
-                    } else {
-                        break;
-                    }
-                }
-            }
-
-            let reads_only = call
-                .parsed
-                .iter()
-                .all(|parsed| matches!(parsed, ParsedCommand::Read { .. }));
-
-            let call_lines: Vec<(&str, Vec<Span<'static>>)> = if reads_only {
-                let names = call
-                    .parsed
-                    .iter()
-                    .map(|parsed| match parsed {
-                        ParsedCommand::Read { name, .. } => name.clone(),
-                        _ => unreachable!(),
-                    })
-                    .unique();
-                vec![(
-                    "Read",
-                    Itertools::intersperse(names.into_iter().map(Into::into), ", ".dim()).collect(),
-                )]
-            } else {
-                let mut lines = Vec::new();
-                for parsed in &call.parsed {
-                    match parsed {
-                        ParsedCommand::Read { name, .. } => {
-                            lines.push(("Read", vec![name.clone().into()]));
-                        }
-                        ParsedCommand::ListFiles { cmd, path } => {
-                            lines.push(("List", vec![path.clone().unwrap_or(cmd.clone()).into()]));
-                        }
-                        ParsedCommand::Search { cmd, query, path } => {
-                            let spans = match (query, path) {
-                                (Some(q), Some(p)) => {
-                                    vec![q.clone().into(), " in ".dim(), p.clone().into()]
-                                }
-                                (Some(q), None) => vec![q.clone().into()],
-                                _ => vec![cmd.clone().into()],
-                            };
-                            lines.push(("Search", spans));
-                        }
-                        ParsedCommand::Unknown { cmd } => {
-                            lines.push(("Run", vec![cmd.clone().into()]));
-                        }
-                    }
-                }
-                lines
-            };
-
-            for (title, line) in call_lines {
-                let line = Line::from(line);
-                let initial_indent = Line::from(vec![title.cyan(), " ".into()]);
-                let subsequent_indent = " ".repeat(initial_indent.width()).into();
-                let wrapped = adaptive_wrap_line(
-                    &line,
-                    RtOptions::new(width as usize)
-                        .initial_indent(initial_indent)
-                        .subsequent_indent(subsequent_indent),
-                );
-                push_owned_lines(&wrapped, &mut out_indented);
-            }
+        if let Some(detail) = summary.detail {
+            let detail_line = Line::from(detail);
+            let wrapped = adaptive_wrap_line(
+                &detail_line,
+                RtOptions::new(width as usize)
+                    .initial_indent("".into())
+                    .subsequent_indent("    ".into()),
+            );
+            let mut detail_lines: Vec<Line<'static>> = Vec::new();
+            push_owned_lines(&wrapped, &mut detail_lines);
+            out.extend(prefix_lines(detail_lines, "  └ ".dim(), "    ".into()));
         }
-
-        out.extend(prefix_lines(out_indented, "  └ ".dim(), "    ".into()));
         out
     }
 
@@ -365,25 +394,46 @@ impl ExecCell {
             None => spinner(call.start_time, self.animations_enabled()),
         };
         let is_interaction = call.is_unified_exec_interaction();
+        let semantic_summary =
+            semantic_summary_for_parsed_commands(&call.parsed, /*exploring*/ false);
+        let use_semantic_header = !call.is_user_shell_command()
+            && !is_interaction
+            && !call.parsed.is_empty()
+            && !call
+                .parsed
+                .iter()
+                .all(|command| matches!(command, ParsedCommand::Unknown { .. }));
         let title = if is_interaction {
-            ""
+            String::new()
+        } else if use_semantic_header {
+            semantic_summary.title.clone()
         } else if self.is_active() {
-            "Running"
+            "Running".to_string()
         } else if call.is_user_shell_command() {
-            "You ran"
+            "You ran".to_string()
         } else {
-            "Ran"
+            "Ran".to_string()
         };
 
         let mut header_line = if is_interaction {
             Line::from(vec![bullet.clone(), " ".into()])
         } else {
-            Line::from(vec![bullet.clone(), " ".into(), title.bold(), " ".into()])
+            Line::from(vec![
+                bullet.clone(),
+                " ".into(),
+                Span::from(title).bold(),
+                " ".into(),
+            ])
         };
         let header_prefix_width = header_line.width();
 
         let cmd_display = if call.is_unified_exec_interaction() {
             format_unified_exec_interaction(&call.command, call.interaction_input.as_deref())
+        } else if use_semantic_header {
+            semantic_summary
+                .detail
+                .clone()
+                .unwrap_or_else(|| "details hidden".to_string())
         } else {
             strip_bash_lc_and_escape(&call.command)
         };
@@ -431,6 +481,10 @@ impl ExecCell {
         }
 
         if let Some(output) = call.output.as_ref() {
+            let should_show_output = call.is_user_shell_command() || output.exit_code != 0;
+            if !should_show_output {
+                return lines;
+            }
             let line_limit = if call.is_user_shell_command() {
                 USER_SHELL_TOOL_CALL_MAX_LINES
             } else {
@@ -957,7 +1011,7 @@ mod tests {
                 formatted_output: url.to_string(),
                 aggregated_output: url.to_string(),
             }),
-            source: ExecCommandSource::Agent,
+            source: ExecCommandSource::UserShell,
             start_time: None,
             duration: None,
             interaction_input: None,

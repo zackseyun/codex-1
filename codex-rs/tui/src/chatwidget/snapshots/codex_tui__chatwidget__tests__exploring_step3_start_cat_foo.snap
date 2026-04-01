@@ -1,7 +1,6 @@
 ---
-source: tui/src/chatwidget/tests.rs
+source: tui/src/chatwidget/tests/exec_flow.rs
 expression: active_blob(&chat)
 ---
-• Exploring
-  └ List ls -la
-    Read foo.txt
+• Inspecting project context
+  └ files: foo.txt • folders: current directory

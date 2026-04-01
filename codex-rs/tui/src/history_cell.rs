@@ -48,7 +48,6 @@ use codex_core::mcp::McpManager;
 use codex_core::mcp::qualified_mcp_tool_name_prefix;
 #[cfg(test)]
 use codex_core::plugins::PluginsManager;
-use codex_core::web_search::web_search_detail;
 use codex_otel::RuntimeMetricsSummary;
 use codex_protocol::account::PlanType;
 use codex_protocol::config_types::ServiceTier;
@@ -1500,33 +1499,32 @@ impl HistoryCell for McpToolCallCell {
             Some(false) => "•".red().bold(),
             None => spinner(Some(self.start_time), self.animations_enabled),
         };
-        let header_text = if status.is_some() {
-            "Called"
-        } else {
-            "Calling"
-        };
-
+        let header_text = semantic_mcp_header(&self.invocation, status.is_some());
         let invocation_line = line_to_static(&format_mcp_invocation(self.invocation.clone()));
-        let mut compact_spans = vec![bullet.clone(), " ".into(), header_text.bold(), " ".into()];
+        let mut compact_spans = vec![bullet.clone(), " ".into(), header_text.bold()];
+        if !invocation_line.spans.is_empty() {
+            compact_spans.push(" · ".dim());
+        }
         let mut compact_header = Line::from(compact_spans.clone());
         let reserved = compact_header.width();
 
-        let inline_invocation =
-            invocation_line.width() <= (width as usize).saturating_sub(reserved);
+        let inline_invocation = invocation_line.width() == 0
+            || invocation_line.width() <= (width as usize).saturating_sub(reserved);
 
-        if inline_invocation {
+        if inline_invocation && invocation_line.width() > 0 {
             compact_header.extend(invocation_line.spans.clone());
             lines.push(compact_header);
         } else {
-            compact_spans.pop(); // drop trailing space for standalone header
             lines.push(Line::from(compact_spans));
 
-            let opts = RtOptions::new((width as usize).saturating_sub(4))
-                .initial_indent("".into())
-                .subsequent_indent("    ".into());
-            let wrapped = adaptive_wrap_line(&invocation_line, opts);
-            let body_lines: Vec<Line<'static>> = wrapped.iter().map(line_to_static).collect();
-            lines.extend(prefix_lines(body_lines, "  └ ".dim(), "    ".into()));
+            if invocation_line.width() > 0 {
+                let opts = RtOptions::new((width as usize).saturating_sub(4))
+                    .initial_indent("".into())
+                    .subsequent_indent("    ".into());
+                let wrapped = adaptive_wrap_line(&invocation_line, opts);
+                let body_lines: Vec<Line<'static>> = wrapped.iter().map(line_to_static).collect();
+                lines.extend(prefix_lines(body_lines, "  └ ".dim(), "    ".into()));
+            }
         }
 
         let mut detail_lines: Vec<Line<'static>> = Vec::new();
@@ -1536,7 +1534,7 @@ impl HistoryCell for McpToolCallCell {
         if let Some(result) = &self.result {
             match result {
                 Ok(codex_protocol::mcp::CallToolResult { content, .. }) => {
-                    if !content.is_empty() {
+                    if status == Some(false) && !content.is_empty() {
                         for block in content {
                             let text = Self::render_content_block(block, detail_wrap_width);
                             for segment in text.split('\n') {
@@ -1600,7 +1598,7 @@ pub(crate) fn new_active_mcp_tool_call(
 
 fn web_search_header(completed: bool) -> &'static str {
     if completed {
-        "Searched"
+        "Reviewed web results"
     } else {
         "Searching the web"
     }
@@ -1655,12 +1653,7 @@ impl HistoryCell for WebSearchCell {
             spinner(Some(self.start_time), self.animations_enabled)
         };
         let header = web_search_header(self.completed);
-        let detail = web_search_detail(self.action.as_ref(), &self.query);
-        let text: Text<'static> = if detail.is_empty() {
-            Line::from(vec![header.bold()]).into()
-        } else {
-            Line::from(vec![header.bold(), " ".into(), detail.into()]).into()
-        };
+        let text: Text<'static> = Line::from(vec![header.bold()]).into();
         PrefixedWrappedHistoryCell::new(text, vec![bullet, " ".into()], "  ").display_lines(width)
     }
 }
@@ -2744,23 +2737,60 @@ fn pluralize(count: u64, singular: &'static str, plural: &'static str) -> &'stat
     if count == 1 { singular } else { plural }
 }
 
-fn format_mcp_invocation<'a>(invocation: McpInvocation) -> Line<'a> {
-    let args_str = invocation
-        .arguments
-        .as_ref()
-        .map(|v: &serde_json::Value| {
-            // Use compact form to keep things short but readable.
-            serde_json::to_string(v).unwrap_or_else(|_| v.to_string())
-        })
-        .unwrap_or_default();
+fn semantic_mcp_header(invocation: &McpInvocation, completed: bool) -> &'static str {
+    let server = invocation.server.to_ascii_lowercase();
+    let tool = invocation.tool.to_ascii_lowercase();
+    let combined = format!("{server}.{tool}");
 
+    if combined.contains("search") && (combined.contains("doc") || combined.contains("readme")) {
+        if completed {
+            "Checked docs"
+        } else {
+            "Searching docs"
+        }
+    } else if combined.contains("search") || combined.contains("find") || combined.contains("query")
+    {
+        if completed {
+            "Looked up external info"
+        } else {
+            "Looking up external info"
+        }
+    } else if combined.contains("read")
+        || combined.contains("open")
+        || combined.contains("fetch")
+        || combined.contains("get")
+    {
+        if completed {
+            "Read external data"
+        } else {
+            "Reading external data"
+        }
+    } else if combined.contains("list") || combined.contains("inventory") {
+        if completed {
+            "Checked available resources"
+        } else {
+            "Checking available resources"
+        }
+    } else if combined.contains("image") || combined.contains("view") {
+        if completed {
+            "Reviewed image"
+        } else {
+            "Reviewing image"
+        }
+    } else {
+        if completed {
+            "Used external tool"
+        } else {
+            "Using external tool"
+        }
+    }
+}
+
+fn format_mcp_invocation<'a>(invocation: McpInvocation) -> Line<'a> {
     let invocation_spans = vec![
-        invocation.server.clone().cyan(),
-        ".".into(),
-        invocation.tool.cyan(),
-        "(".into(),
-        args_str.dim(),
-        ")".into(),
+        invocation.server.clone().dim(),
+        ".".dim(),
+        invocation.tool.dim(),
     ];
     invocation_spans.into()
 }
@@ -3517,13 +3547,7 @@ mod tests {
         );
         let rendered = render_lines(&cell.display_lines(/*width*/ 64));
 
-        assert_eq!(
-            rendered,
-            vec![
-                "• Searched example search query with several generic words to".to_string(),
-                "  exercise wrapping".to_string(),
-            ]
-        );
+        assert_eq!(rendered, vec!["• Reviewed web results".to_string()]);
     }
 
     #[test]
@@ -3539,7 +3563,7 @@ mod tests {
         );
         let rendered = render_lines(&cell.display_lines(/*width*/ 64));
 
-        assert_eq!(rendered, vec!["• Searched short query".to_string()]);
+        assert_eq!(rendered, vec!["• Reviewed web results".to_string()]);
     }
 
     #[test]
