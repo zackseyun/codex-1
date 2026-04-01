@@ -5,6 +5,7 @@ set -euo pipefail
 print_failed_bazel_test_logs=0
 use_node_test_env=0
 remote_download_toplevel=0
+windows_msvc_host_platform=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -20,6 +21,10 @@ while [[ $# -gt 0 ]]; do
       remote_download_toplevel=1
       shift
       ;;
+    --windows-msvc-host-platform)
+      windows_msvc_host_platform=1
+      shift
+      ;;
     --)
       shift
       break
@@ -32,7 +37,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ $# -eq 0 ]]; then
-  echo "Usage: $0 [--print-failed-test-logs] [--use-node-test-env] [--remote-download-toplevel] -- <bazel args> -- <targets>" >&2
+  echo "Usage: $0 [--print-failed-test-logs] [--use-node-test-env] [--remote-download-toplevel] [--windows-msvc-host-platform] -- <bazel args> -- <targets>" >&2
   exit 1
 fi
 
@@ -129,7 +134,7 @@ if [[ $use_node_test_env -eq 1 && "${RUNNER_OS:-}" != "Windows" ]]; then
 fi
 
 post_config_bazel_args=()
-if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
+if [[ "${RUNNER_OS:-}" == "Windows" && $windows_msvc_host_platform -eq 1 ]]; then
   has_host_platform_override=0
   for arg in "${bazel_args[@]}"; do
     if [[ "$arg" == --host_platform=* ]]; then
@@ -139,9 +144,10 @@ if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
   done
 
   if [[ $has_host_platform_override -eq 0 ]]; then
-    # Keep Windows Bazel targets on `windows-gnullvm` for cfg coverage, but run
-    # exec-side helper binaries on the MSVC host platform so Rust test wrappers
-    # and V8's Python-backed generators can resolve a compatible exec toolchain.
+    # Keep Windows Bazel targets on `windows-gnullvm` for cfg coverage, but opt
+    # specific jobs into an MSVC exec platform when they need helper binaries
+    # like Rust test wrappers and V8 generators to resolve a compatible host
+    # toolchain.
     post_config_bazel_args+=("--host_platform=//:local_windows_msvc")
   fi
 fi
