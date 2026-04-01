@@ -237,13 +237,20 @@ impl Renderable for StatusIndicatorWidget {
             return;
         }
 
+        let now = Instant::now();
+        let elapsed_duration = self.elapsed_duration_at(now);
         if self.animations_enabled {
             // Schedule next animation frame.
             self.frame_requester
                 .schedule_frame_in(Duration::from_millis(32));
+        } else if self.show_interrupt_hint {
+            // Even in reduced-motion mode, keep the elapsed timer fresh so the
+            // user can still tell that work is progressing.
+            let millis_until_next_second =
+                1000_u64.saturating_sub(u64::from(elapsed_duration.subsec_millis()));
+            self.frame_requester
+                .schedule_frame_in(Duration::from_millis(millis_until_next_second.max(50)));
         }
-        let now = Instant::now();
-        let elapsed_duration = self.elapsed_duration_at(now);
         let pretty_elapsed = fmt_elapsed_compact(elapsed_duration.as_secs());
 
         let mut spans = Vec::with_capacity(5);

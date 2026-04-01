@@ -2,5 +2,5 @@
 source: tui/src/history_cell.rs
 expression: rendered
 ---
-• Inspecting files
+• 🔎 Inspecting files
   └ auth.rs, shimmer.rs

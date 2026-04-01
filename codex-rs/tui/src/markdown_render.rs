@@ -336,8 +336,7 @@ where
             HeadingLevel::H5 => self.styles.h5,
             HeadingLevel::H6 => self.styles.h6,
         };
-        let content = format!("{} ", "#".repeat(level as usize));
-        self.push_line(Line::from(vec![Span::styled(content, heading_style)]));
+        self.push_line(Line::default());
         self.push_inline_style(heading_style);
         self.needs_newline = false;
     }

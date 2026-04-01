@@ -2,5 +2,6 @@
 source: tui/src/chatwidget/tests/exec_flow.rs
 expression: active_blob(&chat)
 ---
-• Inspecting project context
-  └ files: foo.txt, bar.txt • folders: current directory
+• 🧭 Inspecting project context
+  └ 📄 files: foo.txt, bar.txt
+  └ 📁 folders: current directory

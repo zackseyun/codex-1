@@ -313,7 +313,7 @@ mod tests {
             .collect();
         assert_eq!(
             s2,
-            vec!["", "## Heading"],
+            vec!["", "Heading"],
             "expected a blank separator then the heading line"
         );
 
@@ -326,7 +326,7 @@ mod tests {
         };
 
         assert_eq!(line_to_string(&out1[0]), "Hello.");
-        assert_eq!(line_to_string(&out2[1]), "## Heading");
+        assert_eq!(line_to_string(&out2[1]), "Heading");
     }
 
     #[tokio::test]
@@ -373,7 +373,7 @@ mod tests {
             .collect();
         assert_eq!(
             s2,
-            vec!["", "## Adding Bird subcommand"],
+            vec!["", "Adding Bird subcommand"],
             "expected the heading line only on the final commit"
         );
 
@@ -522,7 +522,7 @@ mod tests {
         );
         // Expect the heading and no fence markers. A blank separator may or may not be rendered at start.
         assert!(
-            texts.iter().any(|s| s == "## Heading"),
+            texts.iter().any(|s| s == "Heading"),
             "expected heading line: {texts:?}"
         );
     }
@@ -536,7 +536,7 @@ mod tests {
             Some(i) => i,
             None => panic!("para present"),
         };
-        let head_idx = match texts.iter().position(|s| s == "## Title") {
+        let head_idx = match texts.iter().position(|s| s == "Title") {
             Some(i) => i,
             None => panic!("heading present"),
         };

@@ -2,5 +2,5 @@
 source: tui/src/history_cell.rs
 expression: rendered
 ---
-• Read external data · 
+• 📥 Read external data · 
   └ metrics.get_nearby_metric

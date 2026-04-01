@@ -1500,8 +1500,15 @@ impl HistoryCell for McpToolCallCell {
             None => spinner(Some(self.start_time), self.animations_enabled),
         };
         let header_text = semantic_mcp_header(&self.invocation, status.is_some());
+        let header_emoji = semantic_mcp_emoji(header_text);
         let invocation_line = line_to_static(&format_mcp_invocation(self.invocation.clone()));
-        let mut compact_spans = vec![bullet.clone(), " ".into(), header_text.bold()];
+        let mut compact_spans = vec![
+            bullet.clone(),
+            " ".into(),
+            header_emoji.cyan(),
+            " ".into(),
+            header_text.bold().cyan(),
+        ];
         if !invocation_line.spans.is_empty() {
             compact_spans.push(" · ".dim());
         }
@@ -1653,7 +1660,7 @@ impl HistoryCell for WebSearchCell {
             spinner(Some(self.start_time), self.animations_enabled)
         };
         let header = web_search_header(self.completed);
-        let text: Text<'static> = Line::from(vec![header.bold()]).into();
+        let text: Text<'static> = Line::from(vec!["🌐 ".cyan(), header.bold().cyan()]).into();
         PrefixedWrappedHistoryCell::new(text, vec![bullet, " ".into()], "  ").display_lines(width)
     }
 }
@@ -2349,6 +2356,7 @@ fn split_request_user_input_answer(
 }
 
 /// Render a user‑friendly plan update styled like a checkbox todo list.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn new_plan_update(update: UpdatePlanArgs) -> PlanUpdateCell {
     let UpdatePlanArgs { explanation, plan } = update;
     PlanUpdateCell { explanation, plan }
@@ -2423,6 +2431,7 @@ impl HistoryCell for ProposedPlanStreamCell {
 }
 
 #[derive(Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct PlanUpdateCell {
     explanation: Option<String>,
     plan: Vec<PlanItemArg>,
@@ -2783,6 +2792,17 @@ fn semantic_mcp_header(invocation: &McpInvocation, completed: bool) -> &'static 
         } else {
             "Using external tool"
         }
+    }
+}
+
+fn semantic_mcp_emoji(header: &str) -> &'static str {
+    match header {
+        "Searching docs" | "Checked docs" => "📚",
+        "Looking up external info" | "Looked up external info" => "🌐",
+        "Reading external data" | "Read external data" => "📥",
+        "Checking available resources" | "Checked available resources" => "🧰",
+        "Reviewing image" | "Reviewed image" => "🖼️",
+        _ => "🧩",
     }
 }
 
@@ -3547,7 +3567,7 @@ mod tests {
         );
         let rendered = render_lines(&cell.display_lines(/*width*/ 64));
 
-        assert_eq!(rendered, vec!["• Reviewed web results".to_string()]);
+        assert_eq!(rendered, vec!["• 🌐 Reviewed web results".to_string()]);
     }
 
     #[test]
@@ -3563,7 +3583,7 @@ mod tests {
         );
         let rendered = render_lines(&cell.display_lines(/*width*/ 64));
 
-        assert_eq!(rendered, vec!["• Reviewed web results".to_string()]);
+        assert_eq!(rendered, vec!["• 🌐 Reviewed web results".to_string()]);
     }
 
     #[test]

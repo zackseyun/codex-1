@@ -313,7 +313,7 @@ async fn exec_history_cell_shows_working_then_completed() {
     let blob = lines_to_single_string(lines);
     // New behavior: no glyph markers; ensure command is shown and no panic.
     assert!(
-        blob.contains("• Ran"),
+        blob.contains("⚙️ Ran command"),
         "expected summary header present: {blob:?}"
     );
     assert!(
@@ -340,8 +340,12 @@ async fn exec_history_cell_shows_working_then_failed() {
     let lines = &cells[0];
     let blob = lines_to_single_string(lines);
     assert!(
-        blob.contains("• Ran false"),
+        blob.contains("⚙️ Ran command"),
         "expected command and header text present: {blob:?}"
+    );
+    assert!(
+        blob.contains("false"),
+        "expected command text present: {blob:?}"
     );
     assert!(blob.to_lowercase().contains("bloop"), "expected error text");
 }
@@ -381,9 +385,10 @@ async fn exec_end_without_begin_uses_event_command() {
     assert_eq!(cells.len(), 1, "expected finalized exec cell to flush");
     let blob = lines_to_single_string(&cells[0]);
     assert!(
-        blob.contains("• Ran echo orphaned"),
+        blob.contains("⚙️ Ran command"),
         "expected command text to come from event: {blob:?}"
     );
+    assert!(blob.contains("echo orphaned"));
     assert!(
         !blob.contains("call-orphan"),
         "call id should not be rendered when event has the command: {blob:?}"
@@ -417,12 +422,13 @@ async fn exec_end_without_begin_does_not_flush_unrelated_running_exploring_cell(
     assert_eq!(cells.len(), 1, "only the orphan end should be inserted");
     let orphan_blob = lines_to_single_string(&cells[0]);
     assert!(
-        orphan_blob.contains("• Ran echo repro-marker"),
+        orphan_blob.contains("⚙️ Ran command"),
         "expected orphan end to render a standalone entry: {orphan_blob:?}"
     );
+    assert!(orphan_blob.contains("echo repro-marker"));
     let active = active_blob(&chat);
     assert!(
-        active.contains("• Inspecting file"),
+        active.contains("• 🔎 Inspecting file"),
         "expected unrelated exploring call to remain active: {active:?}"
     );
     assert!(
@@ -459,7 +465,7 @@ async fn exec_end_without_begin_flushes_completed_unrelated_exploring_cell() {
     let first = lines_to_single_string(&cells[0]);
     let second = lines_to_single_string(&cells[1]);
     assert!(
-        first.contains("• Inspecting directory"),
+        first.contains("📁 Inspecting directory"),
         "expected flushed exploring cell: {first:?}"
     );
     assert!(
@@ -467,9 +473,10 @@ async fn exec_end_without_begin_flushes_completed_unrelated_exploring_cell() {
         "expected flushed exploring cell: {first:?}"
     );
     assert!(
-        second.contains("• Ran echo after"),
+        second.contains("⚙️ Ran command"),
         "expected orphan end entry after flush: {second:?}"
     );
+    assert!(second.contains("echo after"));
     assert!(
         chat.active_cell.is_none(),
         "both entries should be finalized"
@@ -501,7 +508,7 @@ async fn overlapping_exploring_exec_end_is_not_misclassified_as_orphan() {
         "expected second running command to stay in the same active cell: {active:?}"
     );
     assert!(
-        active.contains("• Inspecting project context"),
+        active.contains("• 🧭 Inspecting project context"),
         "expected grouped exploring header to remain active: {active:?}"
     );
 
@@ -536,9 +543,10 @@ async fn exec_history_shows_unified_exec_startup_commands() {
     assert_eq!(cells.len(), 1, "expected finalized exec cell to flush");
     let blob = lines_to_single_string(&cells[0]);
     assert!(
-        blob.contains("• Ran echo unified exec startup"),
+        blob.contains("⚙️ Ran command"),
         "expected startup command to render: {blob:?}"
     );
+    assert!(blob.contains("echo unified exec startup"));
 }
 
 #[tokio::test]
@@ -555,7 +563,7 @@ async fn exec_history_shows_unified_exec_tool_calls() {
     end_exec(&mut chat, begin, "", "", /*exit_code*/ 0);
 
     let blob = active_blob(&chat);
-    assert_eq!(blob, "• Inspecting directory\n  └ current directory\n");
+    assert_eq!(blob, "• 📁 Inspecting directory\n  └ current directory\n");
 }
 
 #[tokio::test]

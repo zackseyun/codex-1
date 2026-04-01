@@ -2,4 +2,4 @@
 source: tui/src/history_cell.rs
 expression: rendered
 ---
-• Searching docs · search.find_docs
+• 📚 Searching docs · search.find_docs

@@ -1363,7 +1363,7 @@ async fn user_turn_includes_personality_from_config() {
 }
 
 #[tokio::test]
-async fn plan_update_renders_history_cell() {
+async fn plan_update_does_not_render_history_cell() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let update = UpdatePlanArgs {
         explanation: Some("Adapting plan".to_string()),
@@ -1387,13 +1387,8 @@ async fn plan_update_renders_history_cell() {
         msg: EventMsg::PlanUpdate(update),
     });
     let cells = drain_insert_history(&mut rx);
-    assert!(!cells.is_empty(), "expected plan update cell to be sent");
-    let blob = lines_to_single_string(cells.last().unwrap());
     assert!(
-        blob.contains("Updated Plan"),
-        "missing plan header: {blob:?}"
+        cells.is_empty(),
+        "expected plan update to stay internal and not duplicate transcript content"
     );
-    assert!(blob.contains("Explore codebase"));
-    assert!(blob.contains("Implement feature"));
-    assert!(blob.contains("Write tests"));
 }

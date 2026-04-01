@@ -2,5 +2,5 @@
 source: tui/src/chatwidget/tests/exec_flow.rs
 expression: active_blob(&chat)
 ---
-• Inspecting directory
+• 📁 Inspecting directory
   └ current directory

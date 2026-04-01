@@ -2,5 +2,5 @@
 source: tui/src/history_cell.rs
 expression: rendered
 ---
-• Checked docs · search.find_docs
+• 📚 Checked docs · search.find_docs
   └ Error: network timeout

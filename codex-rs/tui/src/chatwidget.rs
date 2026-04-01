@@ -3237,7 +3237,7 @@ impl ChatWidget {
             .count();
         self.last_plan_progress = (total > 0).then_some((completed, total));
         self.refresh_terminal_title();
-        self.add_to_history(history_cell::new_plan_update(update));
+        let _ = update;
     }
 
     fn on_exec_approval_request(&mut self, _id: String, ev: ExecApprovalRequestEvent) {

@@ -3,8 +3,9 @@ source: tui/src/chatwidget/tests/exec_flow.rs
 expression: snapshot
 ---
 History:
-• Ran echo repro-marker
+• ⚙️ Ran command
+  └ echo repro-marker
 
 Active:
-• Inspecting file
+• 🔎 Inspecting file
   └ null

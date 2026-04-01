@@ -2,5 +2,6 @@
 source: tui/src/history_cell.rs
 expression: rendered
 ---
-• Inspecting project context
-  └ files: shimmer.rs, status_indicator_widget.rs • search: for shimmer_spans
+• 🧭 Inspecting project context
+  └ 📄 files: shimmer.rs, status_indicator_widget.rs
+  └ 🔍 search: for shimmer_spans
