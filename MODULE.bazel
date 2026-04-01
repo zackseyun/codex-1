@@ -71,6 +71,7 @@ single_version_override(
     patch_strip = 1,
     patches = [
         "//patches:rules_rs_windows_gnullvm_exec.patch",
+        "//patches:rules_rs_windows_exec_linker.patch",
     ],
     version = "0.0.43",
 )
@@ -84,6 +85,7 @@ rules_rust.patch(
         "//patches:rules_rust_windows_gnullvm_build_script.patch",
         "//patches:rules_rust_windows_exec_msvc_build_script_env.patch",
         "//patches:rules_rust_windows_bootstrap_process_wrapper_linker.patch",
+        "//patches:rules_rust_windows_build_script_runner_paths.patch",
         "//patches:rules_rust_windows_msvc_direct_link_args.patch",
         "//patches:rules_rust_windows_exec_bin_target.patch",
         "//patches:rules_rust_windows_exec_std.patch",

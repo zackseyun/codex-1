@@ -129,6 +129,23 @@ if [[ $use_node_test_env -eq 1 && "${RUNNER_OS:-}" != "Windows" ]]; then
 fi
 
 post_config_bazel_args=()
+if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
+  has_host_platform_override=0
+  for arg in "${bazel_args[@]}"; do
+    if [[ "$arg" == --host_platform=* ]]; then
+      has_host_platform_override=1
+      break
+    fi
+  done
+
+  if [[ $has_host_platform_override -eq 0 ]]; then
+    # Keep Windows Bazel targets on `windows-gnullvm` for cfg coverage, but run
+    # exec-side helper binaries on the MSVC host platform so Rust test wrappers
+    # and V8's Python-backed generators can resolve a compatible exec toolchain.
+    post_config_bazel_args+=("--host_platform=//:local_windows_msvc")
+  fi
+fi
+
 if [[ $remote_download_toplevel -eq 1 ]]; then
   # Override the CI config's remote_download_minimal setting when callers need
   # the built artifact to exist on disk after the command completes.
