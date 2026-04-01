@@ -101,22 +101,165 @@ fn semantic_emoji_for_title(title: &str) -> &'static str {
         "Inspecting directory" | "Inspecting directories" => "📁",
         "Searching code" => "🔍",
         "Inspecting project context" => "🧭",
-        "Running shell task" => "⚙️",
+        "Running shell task" | "Ran shell task" => "⚙️",
+        "You ran shell command" => "💻",
+        "Background terminal" => "⌛",
         _ => "•",
     }
 }
 
-fn decorate_semantic_detail(detail: &str) -> String {
-    if detail.starts_with("files:") {
-        format!("📄 {detail}")
+fn semantic_style_for_title(title: &str) -> Style {
+    let color = match title {
+        "Inspecting file" | "Inspecting files" => Color::LightBlue,
+        "Inspecting directory" | "Inspecting directories" => Color::Cyan,
+        "Searching code" => Color::Magenta,
+        "Inspecting project context" => Color::LightCyan,
+        "Running shell task" | "Ran shell task" => Color::Yellow,
+        "You ran shell command" => Color::Green,
+        "Background terminal" => Color::LightMagenta,
+        _ => Color::Cyan,
+    };
+
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+fn semantic_detail_style(detail: &str) -> Style {
+    let color = if detail.starts_with("files:") {
+        Color::LightBlue
     } else if detail.starts_with("folders:") {
-        format!("📁 {detail}")
+        Color::Cyan
     } else if detail.starts_with("search:") {
-        format!("🔍 {detail}")
+        Color::Magenta
     } else if detail.starts_with("shell tasks:") {
-        format!("⚙️ {detail}")
+        Color::Yellow
     } else {
-        detail.to_string()
+        Color::DarkGray
+    };
+
+    Style::default().fg(color)
+}
+
+fn semantic_header_line(bullet: Span<'static>, title: &str) -> Line<'static> {
+    let style = semantic_style_for_title(title);
+    Line::from(vec![
+        bullet,
+        " ".into(),
+        Span::styled(semantic_emoji_for_title(title), style),
+        " ".into(),
+        Span::styled(title.to_string(), style),
+    ])
+}
+
+fn semantic_detail_line(detail: &str) -> Line<'static> {
+    let style = semantic_detail_style(detail);
+
+    let (emoji, label, value) = if let Some(value) = detail.strip_prefix("files:") {
+        ("📄", "Files", value.trim())
+    } else if let Some(value) = detail.strip_prefix("folders:") {
+        ("📁", "Folders", value.trim())
+    } else if let Some(value) = detail.strip_prefix("search:") {
+        ("🔍", "Search", value.trim())
+    } else if let Some(value) = detail.strip_prefix("shell tasks:") {
+        ("⚙️", "Shell", value.trim())
+    } else {
+        ("•", "Details", detail.trim())
+    };
+
+    let mut spans = vec![
+        Span::styled(emoji, style),
+        " ".into(),
+        Span::styled(label, style.add_modifier(Modifier::BOLD)),
+    ];
+    if !value.is_empty() {
+        spans.push(": ".into());
+        spans.push(Span::styled(value.to_string(), style));
+    }
+
+    Line::from(spans)
+}
+
+fn push_semantic_detail_lines(detail: &str, wrap_width: usize, out: &mut Vec<Line<'static>>) {
+    for part in detail.split(" • ").filter(|part| !part.trim().is_empty()) {
+        let line = semantic_detail_line(part);
+        let wrapped = adaptive_wrap_line(
+            &line,
+            RtOptions::new(wrap_width)
+                .initial_indent("".into())
+                .subsequent_indent("    ".into()),
+        );
+        push_owned_lines(&wrapped, out);
+    }
+}
+
+fn summarize_raw_shell_command(command: &str) -> Option<String> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let step_count = trimmed
+        .lines()
+        .flat_map(|line| line.split("&&"))
+        .flat_map(|segment| segment.split("||"))
+        .flat_map(|segment| segment.split(';'))
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .count();
+
+    if step_count > 1 {
+        return Some(format!("{step_count} shell steps"));
+    }
+
+    let head = trimmed.split_whitespace().next()?;
+    let summary = match head {
+        "git" => "git command".to_string(),
+        "rg" | "grep" | "find" | "fd" => "workspace search".to_string(),
+        "ls" | "tree" | "du" => "directory inspection".to_string(),
+        "cat" | "sed" | "head" | "tail" | "awk" => "file inspection".to_string(),
+        "python" | "python3" | "node" | "bash" | "sh" => "script execution".to_string(),
+        "cargo" | "npm" | "pnpm" | "yarn" | "bun" | "go" | "pytest" | "jest" => {
+            "tool invocation".to_string()
+        }
+        other => {
+            let clean = other.trim_matches(|c: char| !c.is_alphanumeric());
+            if clean.is_empty() {
+                "shell command".to_string()
+            } else {
+                format!("{clean} command")
+            }
+        }
+    };
+
+    Some(summary)
+}
+
+fn fallback_summary_for_call(call: &ExecCall, raw_command: &str) -> SemanticSummary {
+    if call.is_unified_exec_interaction() {
+        return SemanticSummary {
+            title: "Background terminal".to_string(),
+            detail: Some(
+                if call
+                    .interaction_input
+                    .as_deref()
+                    .is_some_and(|input| !input.trim().is_empty())
+                {
+                    "shell tasks: sent terminal input".to_string()
+                } else {
+                    "shell tasks: waiting for terminal input".to_string()
+                },
+            ),
+        };
+    }
+
+    SemanticSummary {
+        title: if call.is_user_shell_command() {
+            "You ran shell command".to_string()
+        } else if call.output.is_some() {
+            "Ran shell task".to_string()
+        } else {
+            "Running shell task".to_string()
+        },
+        detail: summarize_raw_shell_command(raw_command),
     }
 }
 
@@ -368,12 +511,24 @@ impl HistoryCell for ExecCell {
     }
 
     fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.display_lines(width)
+        if self.is_exploring_cell() {
+            self.exploring_transcript_lines(width)
+        } else {
+            self.command_transcript_lines(width)
+        }
     }
 }
 
 impl ExecCell {
     fn exploring_display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.exploring_lines(width, /*show_raw_commands*/ false)
+    }
+
+    fn exploring_transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.exploring_lines(width, /*show_raw_commands*/ true)
+    }
+
+    fn exploring_lines(&self, width: u16, show_raw_commands: bool) -> Vec<Line<'static>> {
         let parsed_commands: Vec<ParsedCommand> = self
             .calls
             .iter()
@@ -382,36 +537,71 @@ impl ExecCell {
         let summary =
             semantic_summary_for_parsed_commands(&parsed_commands, /*exploring*/ true);
         let mut out: Vec<Line<'static>> = Vec::new();
-        out.push(Line::from(vec![
+        out.push(semantic_header_line(
             if self.is_active() {
                 spinner(self.active_start_time(), self.animations_enabled())
             } else {
                 "•".dim()
             },
-            " ".into(),
-            semantic_emoji_for_title(&summary.title).cyan(),
-            " ".into(),
-            summary.title.bold().cyan(),
-        ]));
+            &summary.title,
+        ));
 
         if let Some(detail) = summary.detail {
             let mut detail_lines: Vec<Line<'static>> = Vec::new();
-            for part in detail.split(" • ").filter(|part| !part.trim().is_empty()) {
-                let line = Line::from(decorate_semantic_detail(part));
-                let wrapped = adaptive_wrap_line(
-                    &line,
-                    RtOptions::new(width as usize)
-                        .initial_indent("".into())
-                        .subsequent_indent("    ".into()),
-                );
-                push_owned_lines(&wrapped, &mut detail_lines);
+            push_semantic_detail_lines(&detail, width as usize, &mut detail_lines);
+            out.extend(prefix_lines(detail_lines, "  └ ".dim(), "    ".into()));
+        }
+
+        if show_raw_commands {
+            let mut raw_lines: Vec<Line<'static>> = Vec::new();
+            let raw_opts = RtOptions::new(width as usize).word_splitter(WordSplitter::NoHyphenation);
+            for call in &self.calls {
+                let raw_command = strip_bash_lc_and_escape(&call.command);
+                if raw_command.trim().is_empty() {
+                    continue;
+                }
+
+                for line in highlight_bash_to_lines(&raw_command) {
+                    let mut wrapped_lines: Vec<Line<'static>> = Vec::new();
+                    push_owned_lines(&adaptive_wrap_line(&line, raw_opts.clone()), &mut wrapped_lines);
+                    raw_lines.extend(wrapped_lines.into_iter().map(|mut rendered| {
+                        for span in &mut rendered.spans {
+                            span.style = span.style.add_modifier(Modifier::DIM);
+                        }
+                        rendered
+                    }));
+                }
             }
-            out.extend(prefix_lines(detail_lines, "  └ ".dim(), "  └ ".dim()));
+
+            if !raw_lines.is_empty() {
+                out.extend(prefix_lines(raw_lines, Span::from("  │ ").dim(), Span::from("  │ ").dim()));
+            }
         }
         out
     }
 
     fn command_display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.command_lines(
+            width,
+            /*show_raw_command*/ false,
+            /*show_success_output*/ false,
+        )
+    }
+
+    fn command_transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.command_lines(
+            width,
+            /*show_raw_command*/ true,
+            /*show_success_output*/ true,
+        )
+    }
+
+    fn command_lines(
+        &self,
+        width: u16,
+        show_raw_command: bool,
+        show_success_output: bool,
+    ) -> Vec<Line<'static>> {
         let [call] = &self.calls.as_slice() else {
             panic!("Expected exactly one call in a command display cell");
         };
@@ -432,56 +622,34 @@ impl ExecCell {
                 .parsed
                 .iter()
                 .all(|command| matches!(command, ParsedCommand::Unknown { .. }));
-        let title = if is_interaction {
-            "Background terminal".to_string()
-        } else if use_semantic_header {
-            semantic_summary.title.clone()
-        } else if self.is_active() {
-            "Running command".to_string()
-        } else if call.is_user_shell_command() {
-            "You ran".to_string()
-        } else {
-            "Ran command".to_string()
-        };
-        let emoji = if is_interaction {
-            "⌛"
-        } else if use_semantic_header {
-            semantic_emoji_for_title(&title)
-        } else if call.is_user_shell_command() {
-            "💻"
-        } else {
-            "⚙️"
-        };
-
-        let header = Line::from(vec![
-            bullet.clone(),
-            " ".into(),
-            Span::from(emoji).cyan(),
-            " ".into(),
-            Span::from(title).bold().cyan(),
-        ]);
-        let mut lines: Vec<Line<'static>> = vec![header];
-
-        let mut secondary_lines: Vec<Line<'static>> = Vec::new();
-
-        if use_semantic_header && let Some(detail) = semantic_summary.detail.clone() {
-            for part in detail.split(" • ").filter(|part| !part.trim().is_empty()) {
-                let line = Line::from(decorate_semantic_detail(part));
-                let wrapped = adaptive_wrap_line(
-                    &line,
-                    RtOptions::new(layout.command_continuation.wrap_width(width))
-                        .word_splitter(WordSplitter::NoHyphenation),
-                );
-                push_owned_lines(&wrapped, &mut secondary_lines);
-            }
-        }
-
         let raw_command = if call.is_unified_exec_interaction() {
             format_unified_exec_interaction(&call.command, call.interaction_input.as_deref())
         } else {
             strip_bash_lc_and_escape(&call.command)
         };
-        if !raw_command.trim().is_empty() {
+        let display_summary = if use_semantic_header {
+            semantic_summary
+        } else {
+            fallback_summary_for_call(call, &raw_command)
+        };
+
+        let header = semantic_header_line(bullet.clone(), &display_summary.title);
+        let mut lines: Vec<Line<'static>> = vec![header];
+
+        if let Some(detail) = display_summary.detail.as_deref() {
+            let mut detail_lines: Vec<Line<'static>> = Vec::new();
+            push_semantic_detail_lines(
+                detail,
+                layout.command_continuation.wrap_width(width),
+                &mut detail_lines,
+            );
+            if !detail_lines.is_empty() {
+                lines.extend(prefix_lines(detail_lines, Span::from("  └ ").dim(), Span::from("    ")));
+            }
+        }
+
+        if show_raw_command && !raw_command.trim().is_empty() {
+            let mut raw_lines: Vec<Line<'static>> = Vec::new();
             let highlighted_lines = highlight_bash_to_lines(&raw_command);
             let continuation_opts = RtOptions::new(layout.command_continuation.wrap_width(width))
                 .word_splitter(WordSplitter::NoHyphenation);
@@ -491,27 +659,31 @@ impl ExecCell {
                     &adaptive_wrap_line(&line, continuation_opts.clone()),
                     &mut wrapped_lines,
                 );
-                secondary_lines.extend(wrapped_lines.into_iter().map(|mut rendered| {
+                raw_lines.extend(wrapped_lines.into_iter().map(|mut rendered| {
                     for span in &mut rendered.spans {
                         span.style = span.style.add_modifier(Modifier::DIM);
                     }
                     rendered
                 }));
             }
-        }
 
-        let secondary_lines =
-            Self::limit_lines_from_start(&secondary_lines, layout.command_continuation_max_lines);
-        if !secondary_lines.is_empty() {
-            lines.extend(prefix_lines(
-                secondary_lines,
-                Span::from("  └ ").dim(),
-                Span::from("  └ ").dim(),
-            ));
+            if !raw_lines.is_empty() {
+                let raw_lines = Self::limit_lines_from_start(
+                    &raw_lines,
+                    layout.command_continuation_max_lines.saturating_mul(3),
+                );
+                let initial_prefix = if display_summary.detail.is_some() {
+                    Span::from("  │ ").dim()
+                } else {
+                    Span::from("  └ ").dim()
+                };
+                lines.extend(prefix_lines(raw_lines, initial_prefix, Span::from("  │ ").dim()));
+            }
         }
 
         if let Some(output) = call.output.as_ref() {
-            let should_show_output = call.is_user_shell_command() || output.exit_code != 0;
+            let should_show_output =
+                call.is_user_shell_command() || output.exit_code != 0 || show_success_output;
             if !should_show_output {
                 return lines;
             }

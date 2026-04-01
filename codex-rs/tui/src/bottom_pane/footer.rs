@@ -1043,7 +1043,7 @@ const SHORTCUTS: &[ShortcutDescriptor] = &[
             condition: DisplayCondition::Always,
         }],
         prefix: "",
-        label: " to view transcript",
+        label: " to view details",
     },
     ShortcutDescriptor {
         id: ShortcutId::ChangeMode,
