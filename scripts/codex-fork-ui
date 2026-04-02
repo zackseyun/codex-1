@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO="/Users/zackseyun/Documents/GitHub/openai-codex"
+UI_DIR="$REPO/codex-js-renderer"
+BACKEND_BIN="${CODEX_FORK_BACKEND_BIN:-$REPO/codex-rs/target/debug/codex}"
+
+export CODEX_FORK_UI_LAUNCH_CWD="${PWD}"
+export CODEX_FORK_BACKEND_BIN="$BACKEND_BIN"
+
+if [[ ! -x "$BACKEND_BIN" ]]; then
+  (
+    cd "$REPO/codex-rs"
+    cargo build -p codex-cli >/dev/null
+  )
+fi
+
+if [[ ! -d "$UI_DIR/node_modules" ]]; then
+  (
+    cd "$REPO"
+    pnpm install --filter codex-js-renderer >/dev/null
+  )
+fi
+
+exec pnpm --dir "$UI_DIR" exec tsx src/index.tsx "$@"
