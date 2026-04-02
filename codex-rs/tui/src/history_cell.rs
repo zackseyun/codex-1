@@ -40,14 +40,15 @@ use crate::wrapping::adaptive_wrap_line;
 use crate::wrapping::adaptive_wrap_lines;
 use base64::Engine;
 use codex_app_server_protocol::McpServerStatus;
+use codex_config::types::McpServerTransportConfig;
 use codex_core::config::Config;
-use codex_core::config::types::McpServerTransportConfig;
 #[cfg(test)]
 use codex_core::mcp::McpManager;
 #[cfg(test)]
-use codex_core::mcp::qualified_mcp_tool_name_prefix;
-#[cfg(test)]
 use codex_core::plugins::PluginsManager;
+use codex_core::web_search::web_search_detail;
+#[cfg(test)]
+use codex_mcp::mcp::qualified_mcp_tool_name_prefix;
 use codex_otel::RuntimeMetricsSummary;
 use codex_protocol::account::PlanType;
 use codex_protocol::config_types::ServiceTier;
@@ -926,10 +927,7 @@ impl ApprovalDecisionActor {
     }
 }
 
-pub fn new_guardian_denied_patch_request(
-    files: Vec<String>,
-    change_count: usize,
-) -> Box<dyn HistoryCell> {
+pub fn new_guardian_denied_patch_request(files: Vec<String>) -> Box<dyn HistoryCell> {
     let mut summary = vec![
         "Request ".into(),
         "denied".bold(),
@@ -939,7 +937,7 @@ pub fn new_guardian_denied_patch_request(
         summary.push("a patch touching ".into());
         summary.push(Span::from(files[0].clone()).dim());
     } else {
-        summary.push(format!("a patch touching {change_count} changes across ").into());
+        summary.push("a patch touching ".into());
         summary.push(Span::from(files.len().to_string()).dim());
         summary.push(" files".into());
     }
@@ -1660,7 +1658,12 @@ impl HistoryCell for WebSearchCell {
             spinner(Some(self.start_time), self.animations_enabled)
         };
         let header = web_search_header(self.completed);
-        let text: Text<'static> = Line::from(vec!["🌐 ".cyan(), header.bold().cyan()]).into();
+        let detail = web_search_detail(self.action.as_ref(), &self.query);
+        let text: Text<'static> = if detail.is_empty() {
+            Line::from(vec![header.bold()]).into()
+        } else {
+            Line::from(vec![header.bold(), " ".into(), detail.into()]).into()
+        };
         PrefixedWrappedHistoryCell::new(text, vec![bullet, " ".into()], "  ").display_lines(width)
     }
 }
@@ -2821,10 +2824,10 @@ mod tests {
     use crate::exec_cell::CommandOutput;
     use crate::exec_cell::ExecCall;
     use crate::exec_cell::ExecCell;
+    use codex_config::types::McpServerConfig;
+    use codex_config::types::McpServerDisabledReason;
     use codex_core::config::Config;
     use codex_core::config::ConfigBuilder;
-    use codex_core::config::types::McpServerConfig;
-    use codex_core::config::types::McpServerDisabledReason;
     use codex_otel::RuntimeMetricTotals;
     use codex_otel::RuntimeMetricsSummary;
     use codex_protocol::ThreadId;

@@ -38,6 +38,7 @@ codex-core-skills = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-features = { workspace = true }
 codex-login = { workspace = true }
+codex-mcp = { workspace = true }
 codex-shell-command = { workspace = true }
 codex-execpolicy = { workspace = true }
 codex-git-utils = { workspace = true }
@@ -114,7 +115,6 @@ tracing = { workspace = true, features = ["log"] }
 url = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4", "v5"] }
 which = { workspace = true }
-wildmatch = { workspace = true }
 zip = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

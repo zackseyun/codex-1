@@ -1,37 +1,25 @@
 use super::*;
-use crate::AuthManager;
-use crate::CodexAuth;
 use crate::ThreadManager;
 use crate::built_in_model_providers;
 use crate::codex::make_session_and_context;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
-use crate::config::types::ShellEnvironmentPolicy;
 use crate::function_tool::FunctionCallError;
-use crate::protocol::AgentStatus;
-use crate::protocol::AskForApproval;
-use crate::protocol::EventMsg;
-use crate::protocol::FileSystemSandboxPolicy;
-use crate::protocol::NetworkSandboxPolicy;
-use crate::protocol::Op;
-use crate::protocol::SandboxPolicy;
-use crate::protocol::SessionSource;
-use crate::protocol::SubAgentSource;
-use crate::protocol::TurnAbortReason;
-use crate::protocol::TurnAbortedEvent;
-use crate::protocol::TurnCompleteEvent;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::state::TaskKind;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskContext;
 use crate::tools::context::ToolOutput;
-use crate::tools::handlers::multi_agents_v2::AssignTaskHandler as AssignTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
+use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use codex_config::types::ShellEnvironmentPolicy;
 use codex_features::Feature;
+use codex_login::AuthManager;
+use codex_login::CodexAuth;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
@@ -39,9 +27,21 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::AgentStatus;
+use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::NetworkSandboxPolicy;
+use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::TurnAbortReason;
+use codex_protocol::protocol::TurnAbortedEvent;
+use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::user_input::UserInput;
 use core_test_support::TempDirExt;
 use pretty_assertions::assert_eq;
@@ -710,7 +710,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_assign_task_rejects_root_target_from_child() {
+async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
@@ -758,11 +758,11 @@ async fn multi_agent_v2_assign_task_rejects_root_target_from_child() {
         agent_role: None,
     });
 
-    let err = AssignTaskHandlerV2
+    let err = FollowupTaskHandlerV2
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
-            "assign_task",
+            "followup_task",
             function_payload(json!({
                 "target": "/root",
                 "message": "run this",
@@ -770,7 +770,7 @@ async fn multi_agent_v2_assign_task_rejects_root_target_from_child() {
             })),
         ))
         .await
-        .expect_err("assign_task should reject the root target");
+        .expect_err("followup_task should reject the root target");
 
     assert_eq!(
         err,
@@ -1161,7 +1161,7 @@ async fn multi_agent_v2_send_message_rejects_interrupt_parameter() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_assign_task_interrupts_busy_child_without_losing_message() {
+async fn multi_agent_v2_followup_task_interrupts_busy_child_without_losing_message() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
@@ -1213,11 +1213,11 @@ async fn multi_agent_v2_assign_task_interrupts_busy_child_without_losing_message
         )
         .await;
 
-    AssignTaskHandlerV2
+    FollowupTaskHandlerV2
         .handle(invocation(
             session,
             turn,
-            "assign_task",
+            "followup_task",
             function_payload(json!({
                 "target": agent_id.to_string(),
                 "message": "continue",
@@ -1225,7 +1225,7 @@ async fn multi_agent_v2_assign_task_interrupts_busy_child_without_losing_message
             })),
         ))
         .await
-        .expect("interrupting v2 assign_task should succeed");
+        .expect("interrupting v2 followup_task should succeed");
 
     let ops = manager.captured_ops();
     let ops_for_agent: Vec<&Op> = ops
@@ -1281,7 +1281,7 @@ async fn multi_agent_v2_assign_task_interrupts_busy_child_without_losing_message
         }
     })
     .await
-    .expect("interrupting v2 assign_task should preserve the redirected message");
+    .expect("interrupting v2 followup_task should preserve the redirected message");
 
     let _ = thread
         .submit(Op::Shutdown {})
@@ -1290,7 +1290,7 @@ async fn multi_agent_v2_assign_task_interrupts_busy_child_without_losing_message
 }
 
 #[tokio::test]
-async fn multi_agent_v2_assign_task_completion_notifies_parent_on_every_turn() {
+async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
@@ -1342,18 +1342,18 @@ async fn multi_agent_v2_assign_task_completion_notifies_parent_on_every_turn() {
         )
         .await;
 
-    AssignTaskHandlerV2
+    FollowupTaskHandlerV2
         .handle(invocation(
             session,
             turn,
-            "assign_task",
+            "followup_task",
             function_payload(json!({
                 "target": agent_id.to_string(),
                 "message": "continue",
             })),
         ))
         .await
-        .expect("assign_task should succeed");
+        .expect("followup_task should succeed");
 
     let second_turn = thread.codex.session.new_default_turn().await;
     thread
@@ -1419,7 +1419,7 @@ async fn multi_agent_v2_assign_task_completion_notifies_parent_on_every_turn() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_assign_task_rejects_legacy_items_field() {
+async fn multi_agent_v2_followup_task_rejects_legacy_items_field() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
@@ -1455,14 +1455,14 @@ async fn multi_agent_v2_assign_task_rejects_legacy_items_field() {
     let invocation = invocation(
         session,
         turn,
-        "assign_task",
+        "followup_task",
         function_payload(json!({
             "target": agent_id.to_string(),
             "items": [{"type": "text", "text": "continue"}],
         })),
     );
 
-    let Err(err) = AssignTaskHandlerV2.handle(invocation).await else {
+    let Err(err) = FollowupTaskHandlerV2.handle(invocation).await else {
         panic!("legacy items field should be rejected in v2");
     };
     let FunctionCallError::RespondToModel(message) = err else {
