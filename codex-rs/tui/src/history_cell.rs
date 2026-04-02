@@ -372,7 +372,7 @@ impl HistoryCell for UserHistoryCell {
         if let Some(wrapped_message) = wrapped_message {
             lines.extend(prefix_lines(
                 wrapped_message,
-                "  › ".bold().dim(),
+                Span::styled(" ▌ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 "    ".into(),
             ));
         }
