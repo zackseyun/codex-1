@@ -21,12 +21,34 @@ Options:
   -m, --model <model>  Override model
   --last               Resume the most recent thread (prefers current cwd)
   --resume <threadId>  Resume a specific thread id
+  --list               List recent sessions and exit
+
+Slash commands (inside the UI):
+  /resume              List recent sessions (pick one to resume)
+  /resume <id>         Resume a specific session
+  /new                 Start a fresh session
+  /diff                Show git diff
+  /compact             Compact context (save tokens)
+  /status              Show session info
+  /copy                Copy last response to clipboard
+  /clear               Clear the feed
+  /logout              Log out and quit
+  /quit                Exit
+  /help                Show all commands
+
+Keyboard shortcuts:
+  Ctrl+U / Ctrl+D      Scroll feed up / down
+  Ctrl+G               Jump to bottom of feed
+  Ctrl+C               Quit
+  Enter                Submit prompt (or steer active turn)
+  Esc                  Clear input
 
 Examples:
   codex-fork-ui
   codex-fork-ui "summarize this repo"
   codex-fork-ui --last
-  codex-fork-ui --resume thread_123
+  codex-fork-ui --list
+  codex-fork-ui --resume thread_abc123
   codex-fork-ui -C /path/to/repo --last
 EOF
   exit 0

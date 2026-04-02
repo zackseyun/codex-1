@@ -221,6 +221,7 @@ function parseArgs(argv: string[]) {
   let model: string | undefined
   let resumeThreadId: string | undefined
   let resumeLast = false
+  let listSessions = false
   const prompt: string[] = []
 
   for (let i = 0; i < argv.length; i++) {
@@ -237,6 +238,8 @@ function parseArgs(argv: string[]) {
       i++
     } else if (arg === '--last') {
       resumeLast = true
+    } else if (arg === '--list') {
+      listSessions = true
     } else {
       prompt.push(arg)
     }
@@ -247,6 +250,7 @@ function parseArgs(argv: string[]) {
     model,
     resumeThreadId,
     resumeLast,
+    listSessions,
     initialPrompt: prompt.join(' ').trim(),
   }
 }
@@ -1742,4 +1746,52 @@ function App() {
   )
 }
 
-render(<App />)
+// ─── --list mode: print recent sessions and exit ─────────────────────────────
+
+const cliArgs = parseArgs(process.argv.slice(2))
+
+if (cliArgs.listSessions) {
+  ;(async () => {
+    const binary = backendBinary()
+    const client = new AppServerClient(binary)
+    try {
+      await client.initialize()
+      const result = (await client.request('thread/list', {
+        limit: 15,
+        sortKey: 'updated_at',
+        archived: false,
+      })) as any
+      const threads = result?.data || []
+      if (!threads.length) {
+        console.log('No saved sessions found.')
+      } else {
+        console.log('Recent sessions:\n')
+        for (let i = 0; i < threads.length; i++) {
+          const t = threads[i]
+          const name = t.name || t.preview || '(untitled)'
+          const date = t.updated_at
+            ? new Date(t.updated_at).toLocaleString()
+            : ''
+          const cwdNote = t.cwd ? `  ${t.cwd}` : ''
+          console.log(
+            `  ${String(i + 1).padStart(2)}. ${name}`,
+          )
+          console.log(
+            `      ${date}${cwdNote}`,
+          )
+          console.log(
+            `      codex-fork-ui --resume ${t.id}`,
+          )
+          console.log()
+        }
+      }
+    } catch (err) {
+      console.error(`Failed to list sessions: ${err}`)
+    } finally {
+      client.close()
+      process.exit(0)
+    }
+  })()
+} else {
+  render(<App />)
+}
