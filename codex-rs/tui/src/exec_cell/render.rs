@@ -567,7 +567,7 @@ impl HistoryCell for ExecCell {
 
 impl ExecCell {
     fn exploring_display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.exploring_lines(width, /*show_raw_commands*/ false)
+        self.exploring_lines(width, /*show_raw_commands*/ true)
     }
 
     fn exploring_transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
@@ -629,7 +629,7 @@ impl ExecCell {
     fn command_display_lines(&self, width: u16) -> Vec<Line<'static>> {
         self.command_lines(
             width,
-            /*show_raw_command*/ false,
+            /*show_raw_command*/ true,
             /*show_success_output*/ false,
         )
     }
@@ -714,10 +714,6 @@ impl ExecCell {
             }
 
             if !raw_lines.is_empty() {
-                let raw_lines = Self::limit_lines_from_start(
-                    &raw_lines,
-                    layout.command_continuation_max_lines.saturating_mul(3),
-                );
                 let initial_prefix = if display_summary.detail.is_some() {
                     Span::from("  │ ").dim()
                 } else {
