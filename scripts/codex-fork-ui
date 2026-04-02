@@ -8,6 +8,30 @@ BACKEND_BIN="${CODEX_FORK_BACKEND_BIN:-$REPO/codex-rs/target/debug/codex}"
 export CODEX_FORK_UI_LAUNCH_CWD="${PWD}"
 export CODEX_FORK_BACKEND_BIN="$BACKEND_BIN"
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+codex-fork-ui — JavaScript terminal renderer for codex-fork
+
+Usage:
+  codex-fork-ui [options] [prompt]
+
+Options:
+  -h, --help           Show this help
+  -C, --cwd <dir>      Start in a specific working directory
+  -m, --model <model>  Override model
+  --last               Resume the most recent thread (prefers current cwd)
+  --resume <threadId>  Resume a specific thread id
+
+Examples:
+  codex-fork-ui
+  codex-fork-ui "summarize this repo"
+  codex-fork-ui --last
+  codex-fork-ui --resume thread_123
+  codex-fork-ui -C /path/to/repo --last
+EOF
+  exit 0
+fi
+
 if [[ ! -x "$BACKEND_BIN" ]]; then
   (
     cd "$REPO/codex-rs"

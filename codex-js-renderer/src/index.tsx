@@ -209,6 +209,8 @@ function backendBinary() {
 function parseArgs(argv: string[]) {
   let cwd = launchCwd()
   let model: string | undefined
+  let resumeThreadId: string | undefined
+  let resumeLast = false
   const prompt: string[] = []
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -227,14 +229,47 @@ function parseArgs(argv: string[]) {
       continue
     }
 
+    if (arg === '--resume') {
+      resumeThreadId = argv[index + 1] || resumeThreadId
+      index += 1
+      continue
+    }
+
+    if (arg === '--last') {
+      resumeLast = true
+      continue
+    }
+
     prompt.push(arg)
   }
 
   return {
     cwd,
     model,
+    resumeThreadId,
+    resumeLast,
     initialPrompt: prompt.join(' ').trim(),
   }
+}
+
+async function resolveResumeThreadId(client: AppServerClient, cwd: string) {
+  const local = (await client.request('thread/list', {
+    limit: 1,
+    sortKey: 'updated_at',
+    archived: false,
+    cwd,
+  })) as any
+
+  const localThreadId = local?.data?.[0]?.id
+  if (localThreadId) return localThreadId as string
+
+  const global = (await client.request('thread/list', {
+    limit: 1,
+    sortKey: 'updated_at',
+    archived: false,
+  })) as any
+
+  return (global?.data?.[0]?.id as string | undefined) || undefined
 }
 
 function compactPreviewWords(text: string, limit = SHELL_PREVIEW_WORD_LIMIT) {
@@ -807,6 +842,7 @@ function App() {
   const [streamingMessage, setStreamingMessage] = useState('')
   const [backendLog, setBackendLog] = useState<string[]>([])
   const [gitBranch, setGitBranch] = useState<string>('')
+  const [resumeInfo, setResumeInfo] = useState<string>('')
   const initialPromptSent = useRef(false)
   const clientRef = useRef<AppServerClient | null>(null)
 
@@ -902,17 +938,55 @@ function App() {
     ;(async () => {
       try {
         await client.initialize()
-        const response = (await client.request('thread/start', {
-          cwd: args.cwd,
-          model: args.model ?? null,
-          approvalPolicy: 'never',
-          sandbox: 'danger-full-access',
-          experimentalRawEvents: false,
-          persistExtendedHistory: true,
-          serviceName: 'codex_fork_js_renderer',
-        })) as any
+        const threadIdToResume =
+          args.resumeThreadId || (args.resumeLast ? await resolveResumeThreadId(client, args.cwd) : undefined)
+
+        const response = threadIdToResume
+          ? ((await client.request('thread/resume', {
+              threadId: threadIdToResume,
+              cwd: args.cwd,
+              model: args.model ?? null,
+              approvalPolicy: 'never',
+              sandbox: 'danger-full-access',
+              persistExtendedHistory: true,
+            })) as any)
+          : ((await client.request('thread/start', {
+              cwd: args.cwd,
+              model: args.model ?? null,
+              approvalPolicy: 'never',
+              sandbox: 'danger-full-access',
+              experimentalRawEvents: false,
+              persistExtendedHistory: true,
+              serviceName: 'codex_fork_js_renderer',
+            })) as any)
+
         const startedThreadId = response?.thread?.id
         if (startedThreadId) setThreadId(startedThreadId)
+        if (threadIdToResume && response?.thread) {
+          const summary =
+            response.thread.name ||
+            response.thread.preview ||
+            response.thread.cwd ||
+            threadIdToResume
+          setResumeInfo(summary)
+          setEntries(current => [
+            ...current,
+            {
+              id: `resume-${threadIdToResume}`,
+              phase: 'Session',
+              workstream: 'Thread',
+              icon: '↩️',
+              title: 'Session resumed',
+              summary,
+              status: 'info',
+              timestamp: Date.now(),
+              kind: 'thread',
+            },
+          ])
+        }
+        if ((args.resumeLast || args.resumeThreadId) && !threadIdToResume) {
+          setErrorText('No previous session found to resume')
+        }
       } catch (error) {
         setErrorText(String(error))
       }
@@ -1027,7 +1101,7 @@ function App() {
   const objective = [...collapsedEntries]
     .reverse()
     .find(entry => entry.kind === 'user')
-    ?.summary
+    ?.summary || resumeInfo
   const activityEntries = collapsedEntries.filter(
     entry => !['user', 'message', 'reasoning', 'plan', 'thread'].includes(entry.kind),
   )
@@ -1074,6 +1148,13 @@ function App() {
           value={truncateText(objective || 'No prompt yet', 140)}
           color="white"
         />
+        {resumeInfo ? (
+          <MetricRow
+            label="Resumed"
+            value={truncateText(resumeInfo, 140)}
+            color="cyanBright"
+          />
+        ) : null}
         <MetricRow
           label="Status"
           value={`thread ${threadStatus}${gitBranch ? ` · git ${gitBranch}` : ''} · details ${showDetails ? 'on' : 'off'}`}
