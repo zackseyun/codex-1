@@ -3,10 +3,18 @@ import { existsSync } from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
 import process from 'node:process'
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { Box, Text, render, useApp, useInput } from 'ink'
 
-type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue }
 
 type JsonRpcMessage = {
   id?: number | string
@@ -16,57 +24,46 @@ type JsonRpcMessage = {
   error?: { message?: string }
 }
 
-type FeedPhase =
-  | 'Session'
-  | 'Planning'
-  | 'Research'
-  | 'Repository'
-  | 'Editing'
-  | 'Validation'
-  | 'External'
-  | 'Responding'
-  | 'Review'
-  | 'Execution'
-
-type FeedStatus = 'active' | 'done' | 'error' | 'info'
+type EntryKind =
+  | 'user'
+  | 'research'
+  | 'repository'
+  | 'edit'
+  | 'validation'
+  | 'execution'
+  | 'plan'
+  | 'reasoning'
+  | 'response'
+  | 'external'
+  | 'review'
+  | 'session'
 
 type FeedEntry = {
   id: string
-  phase: FeedPhase
-  workstream: string
-  icon: string
-  title: string
-  summary?: string
-  detail?: string
-  raw?: string
-  status: FeedStatus
+  intent: string
+  action?: string
+  result?: string
+  kind: EntryKind
   timestamp: number
-  kind: string
+  isError?: boolean
+  isWarning?: boolean
+  fullText?: string
 }
 
-type CollapsedEntry = FeedEntry & {
-  repeatCount: number
+type ActiveItem = {
+  entry: FeedEntry
+  startTime: number
+  outputLines: string[]
 }
 
-const MAX_VISIBLE_ENTRIES = 18
-const SHELL_PREVIEW_WORD_LIMIT = 6
-const SHELL_PREVIEW_GROUP_LIMIT = 3
+// ─── Constants ───────────────────────────────────────────────────────────────
 
-const PHASE_STYLES: Record<
-  FeedPhase,
-  { color: string; accent: string; icon: string }
-> = {
-  Session: { color: 'cyanBright', accent: 'cyan', icon: '🚀' },
-  Planning: { color: 'magentaBright', accent: 'magenta', icon: '🧠' },
-  Research: { color: 'blueBright', accent: 'blue', icon: '🔎' },
-  Repository: { color: 'greenBright', accent: 'green', icon: '🌿' },
-  Editing: { color: 'yellowBright', accent: 'yellow', icon: '✍️' },
-  Validation: { color: 'redBright', accent: 'red', icon: '🧪' },
-  External: { color: 'cyanBright', accent: 'cyan', icon: '🌐' },
-  Responding: { color: 'white', accent: 'gray', icon: '💬' },
-  Review: { color: 'magentaBright', accent: 'magenta', icon: '🛡️' },
-  Execution: { color: 'yellowBright', accent: 'yellow', icon: '⚙️' },
-}
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+const SPINNER_INTERVAL_MS = 80
+const VIEWPORT_SIZE = 24
+const SCROLL_STEP = 6
+
+// ─── AppServerClient ─────────────────────────────────────────────────────────
 
 class AppServerClient {
   private child
@@ -79,57 +76,63 @@ class AppServerClient {
       reject: (reason: Error) => void
     }
   >()
-  private notificationListeners = new Set<(message: JsonRpcMessage) => void>()
+  private notificationListeners = new Set<
+    (message: JsonRpcMessage) => void
+  >()
   private stderrListeners = new Set<(line: string) => void>()
   private exitListeners = new Set<(code: number | null) => void>()
 
   constructor(private readonly binary: string) {
-    this.child = spawn(this.binary, ['app-server', '--listen', 'stdio://'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env,
-    })
+    this.child = spawn(
+      this.binary,
+      ['app-server', '--listen', 'stdio://'],
+      { stdio: ['pipe', 'pipe', 'pipe'], env: process.env },
+    )
 
-    const stdoutLines = readline.createInterface({ input: this.child.stdout })
+    const stdoutLines = readline.createInterface({
+      input: this.child.stdout,
+    })
     stdoutLines.on('line', line => {
       if (!line.trim()) return
       let message: JsonRpcMessage
       try {
         message = JSON.parse(line)
-      } catch (error) {
-        this.stderrListeners.forEach(listener =>
-          listener(`Failed to parse app-server output: ${String(error)}`),
-        )
+      } catch {
         return
       }
       this.handleMessage(message)
     })
 
-    const stderrLines = readline.createInterface({ input: this.child.stderr })
+    const stderrLines = readline.createInterface({
+      input: this.child.stderr,
+    })
     stderrLines.on('line', line => {
-      this.stderrListeners.forEach(listener => listener(line))
+      this.stderrListeners.forEach(fn => fn(line))
     })
 
     this.child.on('exit', code => {
-      const error = new Error(`Codex app-server exited (${code ?? 'unknown'})`)
-      for (const pending of this.pending.values()) pending.reject(error)
+      const err = new Error(
+        `Codex app-server exited (${code ?? 'unknown'})`,
+      )
+      for (const p of this.pending.values()) p.reject(err)
       this.pending.clear()
-      this.exitListeners.forEach(listener => listener(code))
+      this.exitListeners.forEach(fn => fn(code))
     })
   }
 
-  onNotification(listener: (message: JsonRpcMessage) => void): () => void {
-    this.notificationListeners.add(listener)
-    return () => this.notificationListeners.delete(listener)
+  onNotification(fn: (msg: JsonRpcMessage) => void) {
+    this.notificationListeners.add(fn)
+    return () => this.notificationListeners.delete(fn)
   }
 
-  onStderr(listener: (line: string) => void): () => void {
-    this.stderrListeners.add(listener)
-    return () => this.stderrListeners.delete(listener)
+  onStderr(fn: (line: string) => void) {
+    this.stderrListeners.add(fn)
+    return () => this.stderrListeners.delete(fn)
   }
 
-  onExit(listener: (code: number | null) => void): () => void {
-    this.exitListeners.add(listener)
-    return () => this.exitListeners.delete(listener)
+  onExit(fn: (code: number | null) => void) {
+    this.exitListeners.add(fn)
+    return () => this.exitListeners.delete(fn)
   }
 
   async initialize() {
@@ -137,7 +140,7 @@ class AppServerClient {
       clientInfo: {
         name: 'codex_fork_js_renderer',
         title: 'Codex Fork JS Renderer',
-        version: '0.1.0',
+        version: '0.2.0',
       },
       capabilities: {
         experimentalApi: true,
@@ -147,12 +150,17 @@ class AppServerClient {
     this.notify('initialized')
   }
 
-  request<T extends JsonValue = JsonValue>(method: string, params: JsonValue): Promise<T> {
+  request<T extends JsonValue = JsonValue>(
+    method: string,
+    params: JsonValue,
+  ): Promise<T> {
     const id = this.nextId++
-    const payload = JSON.stringify({ id, method, params })
-    this.child.stdin.write(`${payload}\n`)
+    this.child.stdin.write(`${JSON.stringify({ id, method, params })}\n`)
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (value: JsonValue) => void, reject })
+      this.pending.set(id, {
+        resolve: resolve as (v: JsonValue) => void,
+        reject,
+      })
     })
   }
 
@@ -168,25 +176,28 @@ class AppServerClient {
     this.child.kill('SIGTERM')
   }
 
-  private handleMessage(message: JsonRpcMessage) {
-    if (typeof message.id !== 'undefined' && ('result' in message || 'error' in message)) {
-      const requestId = Number(message.id)
-      const pending = this.pending.get(requestId)
-      if (!pending) return
-      this.pending.delete(requestId)
-      if (message.error) {
-        pending.reject(new Error(message.error.message ?? 'Unknown JSON-RPC error'))
+  private handleMessage(msg: JsonRpcMessage) {
+    if (
+      typeof msg.id !== 'undefined' &&
+      ('result' in msg || 'error' in msg)
+    ) {
+      const p = this.pending.get(Number(msg.id))
+      if (!p) return
+      this.pending.delete(Number(msg.id))
+      if (msg.error) {
+        p.reject(new Error(msg.error.message ?? 'Unknown JSON-RPC error'))
       } else {
-        pending.resolve(message.result ?? null)
+        p.resolve(msg.result ?? null)
       }
       return
     }
-
-    if (message.method) {
-      this.notificationListeners.forEach(listener => listener(message))
+    if (msg.method) {
+      this.notificationListeners.forEach(fn => fn(msg))
     }
   }
 }
+
+// ─── CLI Utilities ───────────────────────────────────────────────────────────
 
 function launchCwd() {
   return process.env.CODEX_FORK_UI_LAUNCH_CWD || process.cwd()
@@ -195,7 +206,6 @@ function launchCwd() {
 function backendBinary() {
   const configured = process.env.CODEX_FORK_BACKEND_BIN
   if (configured && existsSync(configured)) return configured
-
   return path.resolve(
     process.cwd(),
     '..',
@@ -213,34 +223,23 @@ function parseArgs(argv: string[]) {
   let resumeLast = false
   const prompt: string[] = []
 
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index]
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
     if (!arg) continue
-
     if (arg === '--cwd' || arg === '-C') {
-      cwd = argv[index + 1] || cwd
-      index += 1
-      continue
-    }
-
-    if (arg === '--model' || arg === '-m') {
-      model = argv[index + 1] || model
-      index += 1
-      continue
-    }
-
-    if (arg === '--resume') {
-      resumeThreadId = argv[index + 1] || resumeThreadId
-      index += 1
-      continue
-    }
-
-    if (arg === '--last') {
+      cwd = argv[i + 1] || cwd
+      i++
+    } else if (arg === '--model' || arg === '-m') {
+      model = argv[i + 1] || model
+      i++
+    } else if (arg === '--resume') {
+      resumeThreadId = argv[i + 1] || resumeThreadId
+      i++
+    } else if (arg === '--last') {
       resumeLast = true
-      continue
+    } else {
+      prompt.push(arg)
     }
-
-    prompt.push(arg)
   }
 
   return {
@@ -252,635 +251,777 @@ function parseArgs(argv: string[]) {
   }
 }
 
-async function resolveResumeThreadId(client: AppServerClient, cwd: string) {
+async function resolveResumeThreadId(
+  client: AppServerClient,
+  cwd: string,
+) {
   const local = (await client.request('thread/list', {
     limit: 1,
     sortKey: 'updated_at',
     archived: false,
     cwd,
   })) as any
-
-  const localThreadId = local?.data?.[0]?.id
-  if (localThreadId) return localThreadId as string
+  const localId = local?.data?.[0]?.id
+  if (localId) return localId as string
 
   const global = (await client.request('thread/list', {
     limit: 1,
     sortKey: 'updated_at',
     archived: false,
   })) as any
-
   return (global?.data?.[0]?.id as string | undefined) || undefined
 }
 
-function compactPreviewWords(text: string, limit = SHELL_PREVIEW_WORD_LIMIT) {
-  const tokens = text.trim().split(/\s+/).filter(Boolean)
-  if (tokens.length === 0) return ''
-  const preview = tokens.slice(0, limit).join(' ')
-  return tokens.length > limit ? `${preview} …` : preview
+// ─── Text Utilities ──────────────────────────────────────────────────────────
+
+function firstSentence(text: string, maxLen = 160): string {
+  const clean = text.replace(/\s+/g, ' ').trim()
+  const match = clean.match(/^[^.!?\n]+[.!?]?/)
+  const sentence = match ? match[0].trim() : clean
+  return sentence.length > maxLen
+    ? sentence.slice(0, maxLen - 1) + '…'
+    : sentence
 }
 
-function shellSteps(command: string) {
-  return command
-    .split(/\n+/)
-    .flatMap(line => line.split('&&'))
-    .flatMap(segment => segment.split('||'))
-    .flatMap(segment => segment.split(';'))
-    .map(step => step.trim())
+function truncate(text: string, maxLen = 120): string {
+  const clean = text.replace(/\s+/g, ' ').trim()
+  return clean.length > maxLen
+    ? clean.slice(0, maxLen - 1) + '…'
+    : clean
+}
+
+function summarizeShellBrief(command: string): string {
+  const steps = command
+    .split(/[;&|]+/)
+    .map(s => s.trim())
     .filter(Boolean)
+  if (!steps.length) return command
+  const first = steps[0].split(/\s+/).slice(0, 6).join(' ')
+  return steps.length === 1 ? first : `${first} (+${steps.length - 1} more)`
 }
 
-function summarizeShellCommand(command: string) {
-  const previews = shellSteps(command)
-    .map(step => compactPreviewWords(step))
-    .filter(Boolean)
+// ─── Intent Synthesis ────────────────────────────────────────────────────────
 
-  if (!previews.length) return ''
+function synthesizeCommandIntent(item: any): {
+  intent: string
+  action: string
+  kind: EntryKind
+} {
+  const actions: any[] = Array.isArray(item.commandActions)
+    ? item.commandActions
+    : []
+  const raw = String(item.command || '')
+  const lower = raw.toLowerCase()
 
-  const grouped: Array<{ preview: string; count: number }> = []
-  for (const preview of previews) {
-    const last = grouped[grouped.length - 1]
-    if (last && last.preview === preview) {
-      last.count += 1
-    } else {
-      grouped.push({ preview, count: 1 })
-    }
-  }
-
-  const totalSteps = grouped.reduce((sum, group) => sum + group.count, 0)
-  const parts = grouped.slice(0, SHELL_PREVIEW_GROUP_LIMIT).map(group =>
-    group.count > 1 ? `${group.preview} ×${group.count}` : group.preview,
-  )
-  if (grouped.length > SHELL_PREVIEW_GROUP_LIMIT) {
-    parts.push(`+${grouped.length - SHELL_PREVIEW_GROUP_LIMIT} more`)
-  }
-  if (totalSteps > 1) {
-    parts.push(`(${totalSteps} steps)`)
-  }
-  return parts.join(' • ')
-}
-
-function classifyCommandItem(item: any): Omit<FeedEntry, 'id' | 'timestamp' | 'status'> {
-  const actions = Array.isArray(item.commandActions) ? item.commandActions : []
-  const rawCommand = String(item.command || '')
-  const summaryFromActions = summarizeCommandActions(actions, rawCommand)
-  const lower = rawCommand.toLowerCase()
-
-  if (actions.length && actions.every((action: any) => action.type === 'search')) {
+  // Read files
+  if (actions.length && actions.every((a: any) => a.type === 'read')) {
+    const files = actions
+      .map((a: any) => path.basename(a.path || a.name || 'file'))
+      .slice(0, 4)
+    const filesStr = files.join(', ')
     return {
-      phase: 'Research',
-      workstream: 'Code search',
-      icon: '🔍',
-      title: 'Code search',
-      summary: summaryFromActions,
-      raw: rawCommand,
-      kind: 'command',
+      intent: `Examining ${filesStr}`,
+      action: `read ${filesStr}`,
+      kind: 'research',
     }
   }
 
-  if (actions.length && actions.every((action: any) => action.type === 'read')) {
+  // Search
+  if (actions.length && actions.every((a: any) => a.type === 'search')) {
+    const query = actions.find((a: any) => a.query)?.query || 'pattern'
+    const searchPath = actions.find((a: any) => a.path)?.path
+    const loc = searchPath ? ` in ${searchPath}` : ''
     return {
-      phase: 'Research',
-      workstream: 'File inspection',
-      icon: '📄',
-      title: 'File read',
-      summary: summaryFromActions,
-      raw: rawCommand,
-      kind: 'command',
+      intent: `Looking for "${query}"${loc}`,
+      action: `search "${query}"${loc}`,
+      kind: 'research',
     }
   }
 
-  if (actions.length && actions.every((action: any) => action.type === 'listFiles')) {
-    return {
-      phase: 'Research',
-      workstream: 'Directory inspection',
-      icon: '📁',
-      title: 'Directory scan',
-      summary: summaryFromActions,
-      raw: rawCommand,
-      kind: 'command',
-    }
-  }
-
+  // List files
   if (
-    lower.startsWith('git status') ||
-    lower.startsWith('git branch') ||
-    lower.startsWith('git rev-parse') ||
-    lower.startsWith('git log') ||
-    lower.startsWith('git diff')
+    actions.length &&
+    actions.every((a: any) => a.type === 'listFiles')
+  ) {
+    const dir = actions[0]?.path || '.'
+    return {
+      intent: `Exploring ${dir} structure`,
+      action: `list ${dir}`,
+      kind: 'research',
+    }
+  }
+
+  // Mixed read/search/list
+  if (
+    actions.length &&
+    actions.every((a: any) =>
+      ['read', 'search', 'listFiles'].includes(a.type),
+    )
   ) {
     return {
-      phase: 'Repository',
-      workstream: 'Repo check',
-      icon: '🌿',
-      title: 'Repo check',
-      summary: summarizeShellCommand(rawCommand),
-      raw: rawCommand,
-      kind: 'command',
+      intent: 'Investigating project structure',
+      action: summarizeShellBrief(raw),
+      kind: 'research',
     }
   }
 
+  // Git commands
+  if (/^git\s+(status|diff|log|branch|rev-parse|show)/.test(lower)) {
+    const intents: Record<string, string> = {
+      status: 'Checking for uncommitted changes',
+      diff: 'Reviewing current changes',
+      log: 'Looking at recent commit history',
+      branch: 'Checking current branch',
+      show: 'Inspecting a commit',
+    }
+    const sub = lower.split(/\s+/)[1] || ''
+    return {
+      intent: intents[sub] || 'Checking repository state',
+      action: summarizeShellBrief(raw),
+      kind: 'repository',
+    }
+  }
+
+  // Git write operations
+  if (/^git\s+(add|commit|push|merge|rebase|checkout|stash)/.test(lower)) {
+    return {
+      intent: `Running git ${lower.split(/\s+/)[1]}`,
+      action: summarizeShellBrief(raw),
+      kind: 'repository',
+    }
+  }
+
+  // Tests
   if (
-    /\b(pytest|jest|vitest|maestro|npm test|pnpm test|cargo test|go test|xcodebuild)\b/.test(
+    /\b(pytest|jest|vitest|npm test|pnpm test|yarn test|cargo test|go test|xcodebuild test)\b/.test(
       lower,
     )
   ) {
     return {
-      phase: 'Validation',
-      workstream: 'Validation',
-      icon: '🧪',
-      title: 'Validation run',
-      summary: summarizeShellCommand(rawCommand),
-      raw: rawCommand,
-      kind: 'command',
+      intent: 'Running tests to verify changes',
+      action: summarizeShellBrief(raw),
+      kind: 'validation',
     }
   }
 
-  if (/\b(cargo build|npm run build|pnpm build|tsc|gradle|make)\b/.test(lower)) {
-    return {
-      phase: 'Validation',
-      workstream: 'Build',
-      icon: '🏗️',
-      title: 'Build step',
-      summary: summarizeShellCommand(rawCommand),
-      raw: rawCommand,
-      kind: 'command',
-    }
-  }
-
+  // Build / compile
   if (
-    actions.length &&
-    actions.every((action: any) =>
-      ['read', 'listFiles', 'search'].includes(action.type),
+    /\b(cargo build|npm run build|pnpm build|yarn build|tsc|gradle|make|cmake)\b/.test(
+      lower,
     )
   ) {
     return {
-      phase: 'Research',
-      workstream: 'Repo discovery',
-      icon: '🧭',
-      title: 'Repo discovery',
-      summary: summaryFromActions,
-      raw: rawCommand,
-      kind: 'command',
+      intent: 'Building to check for errors',
+      action: summarizeShellBrief(raw),
+      kind: 'validation',
     }
   }
 
-  return {
-    phase: 'Execution',
-    workstream: 'Shell task',
-    icon: '⚙️',
-    title:
-      item.source === 'userShell' ? 'User shell command' : 'Shell task',
-    summary: summarizeShellCommand(rawCommand),
-    raw: rawCommand,
-    kind: 'command',
-  }
-}
-
-function summarizeCommandActions(actions: any[], fallbackCommand: string) {
-  const previews = actions
-    .map(action => {
-      if (action.type === 'read') {
-        return `read ${path.basename(action.path || action.name || 'file')}`
-      }
-      if (action.type === 'listFiles') {
-        return `list ${action.path || 'current directory'}`
-      }
-      if (action.type === 'search') {
-        const query = action.query ? `"${action.query}"` : 'workspace'
-        const target = action.path ? ` in ${action.path}` : ''
-        return `search ${query}${target}`
-      }
-      return compactPreviewWords(action.command || fallbackCommand)
-    })
-    .filter(Boolean)
-
-  if (!previews.length) {
-    return summarizeShellCommand(fallbackCommand)
-  }
-
-  const grouped: Array<{ preview: string; count: number }> = []
-  for (const preview of previews) {
-    const last = grouped[grouped.length - 1]
-    if (last && last.preview === preview) {
-      last.count += 1
-    } else {
-      grouped.push({ preview, count: 1 })
+  // Lint / format
+  if (/\b(eslint|prettier|rustfmt|gofmt|black|ruff)\b/.test(lower)) {
+    return {
+      intent: 'Checking code style',
+      action: summarizeShellBrief(raw),
+      kind: 'validation',
     }
   }
 
-  const parts = grouped.slice(0, SHELL_PREVIEW_GROUP_LIMIT).map(group =>
-    group.count > 1 ? `${group.preview} ×${group.count}` : group.preview,
-  )
-  if (grouped.length > SHELL_PREVIEW_GROUP_LIMIT) {
-    parts.push(`+${grouped.length - SHELL_PREVIEW_GROUP_LIMIT} more`)
-  }
-  return parts.join(' • ')
-}
-
-function summarizeFileChanges(item: any) {
-  const changes = Array.isArray(item.changes) ? item.changes : []
-  const names = changes
-    .map((change: any) => change.path || change.filePath || change.file_name)
-    .filter(Boolean)
-    .map((name: string) => path.basename(name))
-  if (!names.length) return `${changes.length || 0} file updates`
-  const preview = names.slice(0, 3).join(', ')
-  return names.length > 3 ? `${preview} +${names.length - 3} more` : preview
-}
-
-function summarizeMcpTool(item: any) {
-  const server = item.server || 'tool'
-  const tool = item.tool || 'call'
-  return `${server}.${tool}`
-}
-
-function normalizeWhitespace(text: string) {
-  return text.replace(/\s+/g, ' ').trim()
-}
-
-function truncateText(text: string, maxChars = 120) {
-  const normalized = normalizeWhitespace(text)
-  if (normalized.length <= maxChars) return normalized
-  return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`
-}
-
-function extractTakeaways(text: string, maxItems = 3) {
-  const normalized = String(text || '').replace(/\r/g, '')
-  if (!normalized.trim()) return []
-
-  const cleanedLines = normalized
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean)
-    .map(line =>
-      line
-        .replace(/^[-*•]\s+/, '')
-        .replace(/^\d+[.)]\s+/, '')
-        .replace(/^#+\s+/, '')
-        .trim(),
+  // Install
+  if (
+    /\b(npm install|pnpm install|yarn add|pip install|cargo add)\b/.test(
+      lower,
     )
-    .filter(line => line && !(line.endsWith(':') && line.length < 48))
-    .map(line => truncateText(line, 160))
-
-  if (cleanedLines.length > 1) {
-    return cleanedLines.slice(0, maxItems)
+  ) {
+    return {
+      intent: 'Installing dependencies',
+      action: summarizeShellBrief(raw),
+      kind: 'execution',
+    }
   }
 
-  return normalized
-    .split(/(?<=[.!?])\s+/)
-    .map(sentence => truncateText(sentence, 160))
-    .filter(Boolean)
-    .slice(0, maxItems)
+  // Default shell
+  return {
+    intent: summarizeShellBrief(raw),
+    action: summarizeShellBrief(raw),
+    kind: 'execution',
+  }
 }
 
-function primaryTakeaway(text: string) {
-  return extractTakeaways(text, 1)[0] || ''
-}
-
-function secondaryTakeawayText(text: string) {
-  const rest = extractTakeaways(text, 3).slice(1)
-  return rest.length ? rest.join(' • ') : undefined
-}
-
-function compactErrorText(text: string | null | undefined) {
-  if (!text) return undefined
-  return truncateText(text, 180)
-}
-
-function toFeedEntryFromItem(item: any, statusOverride?: FeedStatus): FeedEntry | null {
+function itemToFeedEntry(item: any): FeedEntry | null {
   if (!item || !item.type) return null
-  const timestamp = Date.now()
-
-  if (item.type === 'userMessage' || item.type === 'hookPrompt') {
-    return null
-  }
+  if (item.type === 'userMessage' || item.type === 'hookPrompt') return null
 
   if (item.type === 'plan') {
-    const summary = primaryTakeaway(String(item.text || ''))
-    if (!summary) return null
+    const text = String(item.text || '').trim()
+    if (!text) return null
     return {
       id: item.id,
-      phase: 'Planning',
-      workstream: 'Plan',
-      icon: '🧠',
-      title: 'Plan update',
-      summary,
-      detail: secondaryTakeawayText(String(item.text || '')),
-      raw: String(item.text || '').trim() || undefined,
-      status: statusOverride ?? 'info',
-      timestamp,
+      intent: firstSentence(text),
+      action:
+        text.split('\n').length > 1
+          ? `${text.split('\n').filter(Boolean).length} steps`
+          : undefined,
       kind: 'plan',
+      timestamp: Date.now(),
+      fullText: text,
     }
   }
 
   if (item.type === 'reasoning') {
-    const rawReasoning = Array.isArray(item.summary)
+    const text = Array.isArray(item.summary)
       ? item.summary.join('\n')
       : String(item.content || '')
-    const summary = primaryTakeaway(rawReasoning)
+    const summary = firstSentence(text)
     if (!summary) return null
     return {
       id: item.id,
-      phase: 'Planning',
-      workstream: 'Reasoning',
-      icon: '🧠',
-      title: 'Reasoning',
-      summary,
-      detail: secondaryTakeawayText(rawReasoning),
-      raw: rawReasoning || undefined,
-      status: statusOverride ?? 'info',
-      timestamp,
+      intent: summary,
       kind: 'reasoning',
+      timestamp: Date.now(),
+      fullText: text,
     }
   }
 
   if (item.type === 'agentMessage') {
-    const text = String(item.text || '')
-    const summary = primaryTakeaway(text)
-    if (!summary) return null
+    const text = String(item.text || '').trim()
+    if (!text) return null
     return {
       id: item.id,
-      phase: 'Responding',
-      workstream:
-        item.phase === 'final_answer' ? 'Final answer' : 'Commentary',
-      icon: item.phase === 'final_answer' ? '✅' : '💬',
-      title:
-        item.phase === 'final_answer' ? 'Final answer' : 'Takeaway',
-      summary,
-      detail: secondaryTakeawayText(text),
-      raw: text || undefined,
-      status: statusOverride ?? 'done',
-      timestamp,
-      kind: 'message',
+      intent: text,
+      kind: 'response',
+      timestamp: Date.now(),
+      fullText: text,
     }
   }
 
   if (item.type === 'commandExecution') {
-    const base = classifyCommandItem(item)
+    const { intent, action, kind } = synthesizeCommandIntent(item)
+    const failed =
+      item.status === 'failed' || item.status === 'declined'
+    const errorOutput =
+      failed && item.aggregatedOutput
+        ? truncate(String(item.aggregatedOutput).trim(), 200)
+        : undefined
     return {
       id: item.id,
-      ...base,
-      status:
-        statusOverride ??
-        (item.status === 'failed' || item.status === 'declined'
-          ? 'error'
-          : item.status === 'inProgress'
-            ? 'active'
-            : 'done'),
-      detail: compactErrorText(
-        item.status === 'failed' && item.aggregatedOutput
-          ? String(item.aggregatedOutput).trim()
-          : undefined,
-      ),
-      timestamp,
+      intent,
+      action,
+      result: errorOutput,
+      kind,
+      timestamp: Date.now(),
+      isError: failed,
+      isWarning: failed,
     }
   }
 
   if (item.type === 'fileChange') {
+    const changes: any[] = Array.isArray(item.changes)
+      ? item.changes
+      : []
+    const files = changes
+      .map((c: any) =>
+        path.basename(c.path || c.filePath || c.file_name || ''),
+      )
+      .filter(Boolean)
+    const added = changes.reduce(
+      (s: number, c: any) => s + (c.linesAdded || 0),
+      0,
+    )
+    const removed = changes.reduce(
+      (s: number, c: any) => s + (c.linesRemoved || 0),
+      0,
+    )
+    const fileList = files.length
+      ? files.slice(0, 3).join(', ') +
+        (files.length > 3 ? ` +${files.length - 3} more` : '')
+      : `${changes.length} files`
+    const diffNote =
+      added || removed ? ` (+${added} −${removed})` : ''
     return {
       id: item.id,
-      phase: 'Editing',
-      workstream: 'Code changes',
-      icon: '✍️',
-      title: 'File changes',
-      summary: summarizeFileChanges(item),
-      status: statusOverride ?? 'done',
-      timestamp,
-      kind: 'fileChange',
+      intent: `Updating ${fileList}`,
+      action: `modified ${fileList}${diffNote}`,
+      kind: 'edit',
+      timestamp: Date.now(),
     }
   }
 
   if (item.type === 'mcpToolCall') {
+    const server = item.server || 'tool'
+    const tool = item.tool || 'call'
     return {
       id: item.id,
-      phase: 'External',
-      workstream: 'Tool call',
-      icon: '🧩',
-      title: item.status === 'failed' ? 'Tool call failed' : 'External tool',
-      summary: summarizeMcpTool(item),
-      status:
-        statusOverride ??
-        (item.status === 'failed'
-          ? 'error'
-          : item.status === 'inProgress'
-            ? 'active'
-            : 'done'),
-      timestamp,
-      kind: 'mcp',
+      intent: `Using ${server}.${tool}`,
+      action: `${server}.${tool}`,
+      kind: 'external',
+      timestamp: Date.now(),
+      isError: item.status === 'failed',
     }
   }
 
   if (item.type === 'webSearch') {
     return {
       id: item.id,
-      phase: 'External',
-      workstream: 'Web research',
-      icon: '🌐',
-      title: 'Web research',
-      summary: String(item.query || 'searching the web'),
-      status: statusOverride ?? 'done',
-      timestamp,
-      kind: 'webSearch',
+      intent: `Researching: ${item.query || 'web search'}`,
+      action: `search "${item.query || ''}"`,
+      kind: 'external',
+      timestamp: Date.now(),
     }
   }
 
-  if (item.type === 'enteredReviewMode' || item.type === 'exitedReviewMode') {
-    const summary = primaryTakeaway(String(item.review || ''))
-    if (!summary) return null
+  if (
+    item.type === 'enteredReviewMode' ||
+    item.type === 'exitedReviewMode'
+  ) {
     return {
       id: item.id,
-      phase: 'Review',
-      workstream: 'Review',
-      icon: '🛡️',
-      title: item.type === 'enteredReviewMode' ? 'Entered review' : 'Exited review',
-      summary,
-      detail: secondaryTakeawayText(String(item.review || '')),
-      raw: String(item.review || '') || undefined,
-      status: statusOverride ?? 'info',
-      timestamp,
+      intent:
+        item.type === 'enteredReviewMode'
+          ? 'Entering code review'
+          : 'Finished code review',
       kind: 'review',
+      timestamp: Date.now(),
+    }
+  }
+
+  if (item.type === 'contextCompaction') {
+    return {
+      id: item.id,
+      intent: 'Compacting context to stay within limits',
+      kind: 'session',
+      timestamp: Date.now(),
     }
   }
 
   return null
 }
 
-function collapseEntries(entries: FeedEntry[]) {
-  const collapsed: CollapsedEntry[] = []
+// ─── Hooks ───────────────────────────────────────────────────────────────────
 
-  for (const entry of entries) {
-    const last = collapsed[collapsed.length - 1]
-    const canCollapse =
-      last &&
-      last.phase === entry.phase &&
-      last.workstream === entry.workstream &&
-      last.title === entry.title &&
-      (last.summary || '') === (entry.summary || '') &&
-      (last.detail || '') === (entry.detail || '') &&
-      (last.raw || '') === (entry.raw || '') &&
-      last.status === entry.status
-
-    if (canCollapse) {
-      last.repeatCount += 1
-      last.timestamp = entry.timestamp
-    } else {
-      collapsed.push({ ...entry, repeatCount: 1 })
-    }
-  }
-
-  return collapsed
+function useSpinner(active: boolean): string {
+  const [frame, setFrame] = useState(0)
+  useEffect(() => {
+    if (!active) return
+    const timer = setInterval(
+      () => setFrame(f => (f + 1) % SPINNER_FRAMES.length),
+      SPINNER_INTERVAL_MS,
+    )
+    return () => clearInterval(timer)
+  }, [active])
+  return active ? (SPINNER_FRAMES[frame] ?? '⠋') : ''
 }
 
-function upsertEntry(entries: FeedEntry[], nextEntry: FeedEntry) {
-  const existingIndex = entries.findIndex(entry => entry.id === nextEntry.id)
-  if (existingIndex === -1) return [...entries, nextEntry]
-
-  const updated = [...entries]
-  updated[existingIndex] = { ...updated[existingIndex], ...nextEntry }
-  return updated
+function useElapsed(startTime: number | null): string {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    if (startTime === null) return
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [startTime])
+  if (startTime === null) return ''
+  const total = Math.floor((now - startTime) / 1000)
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${String(s).padStart(2, '0')}`
 }
 
-function statusColor(status: FeedStatus) {
-  if (status === 'active') return 'yellowBright'
-  if (status === 'error') return 'redBright'
-  if (status === 'done') return 'greenBright'
-  return 'gray'
-}
+// ─── Components ──────────────────────────────────────────────────────────────
 
-function mutedColorForEntry(entry: CollapsedEntry) {
-  if (entry.status === 'error') return 'redBright'
-  if (entry.status === 'active') return PHASE_STYLES[entry.phase].color
-  return 'white'
-}
-
-function Divider() {
-  const width = process.stdout.columns || 80
-  return <Text color="gray">{'─'.repeat(Math.max(20, Math.min(width - 2, 88)))}</Text>
-}
-
-function SectionTitle({ title, hint }: { title: string; hint?: string }) {
+function Divider({ dim = false }: { dim?: boolean }) {
+  const w = process.stdout.columns || 80
   return (
-    <Box flexDirection="column" marginTop={1}>
-      <Text color="gray">
-        {title}
-        {hint ? ` · ${hint}` : ''}
-      </Text>
-    </Box>
-  )
-}
-
-function MetricRow({
-  label,
-  value,
-  color = 'white',
-}: {
-  label: string
-  value: string
-  color?: string
-}) {
-  if (!value) return null
-  return (
-    <Text>
-      <Text color="gray">{label.padEnd(10)}</Text>
-      <Text color={color}>{value}</Text>
+    <Text color={dim ? 'gray' : 'gray'} dimColor={dim}>
+      {'─'.repeat(Math.max(20, Math.min(w - 4, 88)))}
     </Text>
   )
 }
 
-function SummaryPanel({
-  title,
-  accentColor,
-  children,
-}: {
-  title: string
-  accentColor: string
-  children: React.ReactNode
-}) {
+function EntryView({ entry }: { entry: FeedEntry }) {
+  // ── User message ──
+  if (entry.kind === 'user') {
+    return (
+      <Box flexDirection="column" marginTop={1} marginBottom={0}>
+        <Text>
+          <Text color="gray" dimColor>
+            {'  ▍ '}
+          </Text>
+          <Text color="white" bold>
+            {entry.intent}
+          </Text>
+        </Text>
+      </Box>
+    )
+  }
+
+  // ── Agent response ──
+  if (entry.kind === 'response') {
+    const text = entry.fullText || entry.intent
+    const lines = text.split('\n')
+    return (
+      <Box flexDirection="column" marginTop={1} marginBottom={1}>
+        {lines.map((line, i) => (
+          <Text key={i}>{'  '}{line}</Text>
+        ))}
+      </Box>
+    )
+  }
+
+  // ── Session info ──
+  if (entry.kind === 'session') {
+    return (
+      <Box marginTop={0}>
+        <Text color="gray" dimColor>
+          {'  '}{entry.intent}
+        </Text>
+      </Box>
+    )
+  }
+
+  // ── Error entries ──
+  if (entry.isError) {
+    return (
+      <Box flexDirection="column" marginTop={0}>
+        <Text>
+          <Text color="yellow">{'  ⚠ '}</Text>
+          <Text color="yellow">{entry.intent}</Text>
+        </Text>
+        {entry.result && (
+          <Text color="gray" dimColor>
+            {'    '}{truncate(entry.result, 180)}
+          </Text>
+        )}
+      </Box>
+    )
+  }
+
+  // ── Plan ──
+  if (entry.kind === 'plan') {
+    return (
+      <Box flexDirection="column" marginTop={0}>
+        <Text>
+          <Text color="gray" dimColor>{'  ◇ '}</Text>
+          <Text>{entry.intent}</Text>
+        </Text>
+        {entry.action && (
+          <Text color="gray" dimColor>
+            {'    '}{entry.action}
+          </Text>
+        )}
+      </Box>
+    )
+  }
+
+  // ── Reasoning ──
+  if (entry.kind === 'reasoning') {
+    return (
+      <Box flexDirection="column" marginTop={0}>
+        <Text>
+          <Text color="gray" dimColor>{'  ◇ '}</Text>
+          <Text color="gray">{entry.intent}</Text>
+        </Text>
+      </Box>
+    )
+  }
+
+  // ── Action entries (research, edit, validation, execution, etc.) ──
+  const hasAction = !!entry.action
+  const hasResult = !!entry.result
+
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={accentColor} paddingX={1} marginTop={1}>
-      <Text color={accentColor}>{title}</Text>
-      <Box flexDirection="column">{children}</Box>
+    <Box flexDirection="column" marginTop={0}>
+      <Text>
+        {'  '}
+        <Text>{entry.intent}</Text>
+      </Text>
+      {hasAction && (
+        <Text color="gray" dimColor>
+          {'  '}
+          {hasResult ? '│' : '└'} {entry.action}
+        </Text>
+      )}
+      {hasResult && (
+        <Text color={entry.isWarning ? 'yellow' : 'gray'} dimColor={!entry.isWarning}>
+          {'  └ '}{entry.result}
+        </Text>
+      )}
     </Box>
   )
 }
 
-function ActivityRow({
-  entry,
-  showDetails,
+function NowPanel({
+  activeItem,
+  streamingText,
+  threadStatus,
+  gitBranch,
+  model,
+  errorText,
 }: {
-  entry: CollapsedEntry
-  showDetails: boolean
+  activeItem: ActiveItem | null
+  streamingText: string
+  threadStatus: string
+  gitBranch: string
+  model?: string
+  errorText: string | null
 }) {
-  return (
-    <Box flexDirection="column" marginTop={1}>
-      <Text>
-        <Text color={PHASE_STYLES[entry.phase].accent}>{entry.icon} {entry.workstream}</Text>
-        <Text color="gray"> · </Text>
-        <Text color={mutedColorForEntry(entry)}>
-          {truncateText(entry.summary || entry.title, 150)}
+  const isActive = !!activeItem || threadStatus === 'active'
+  const spinner = useSpinner(isActive)
+  const elapsed = useElapsed(activeItem?.startTime ?? null)
+  const w = process.stdout.columns || 80
+
+  // ── Error display ──
+  const errorLine = errorText ? (
+    <Text>
+      <Text color="yellow">{'  ⚠ '}</Text>
+      <Text color="yellow">{truncate(errorText, w - 8)}</Text>
+    </Text>
+  ) : null
+
+  // ── Idle state ──
+  if (!activeItem && (threadStatus === 'idle' || threadStatus === 'unknown')) {
+    const parts = ['Ready']
+    if (gitBranch) parts.push(gitBranch)
+    if (model) parts.push(model)
+    return (
+      <Box flexDirection="column">
+        <Divider dim />
+        {errorLine}
+        <Text>
+          <Text color="green">{'  ● '}</Text>
+          <Text color="gray">{parts.join(' · ')}</Text>
         </Text>
-        {entry.repeatCount > 1 ? <Text color="gray">{` ×${entry.repeatCount}`}</Text> : null}
+      </Box>
+    )
+  }
+
+  // ── Starting state ──
+  if (!activeItem && threadStatus === 'starting') {
+    return (
+      <Box flexDirection="column">
+        <Divider dim />
+        {errorLine}
+        <Text color="gray">{'  '}Starting session...</Text>
+      </Box>
+    )
+  }
+
+  // ── Active state with spinner + timer + live output ──
+  const intentText = activeItem?.entry.intent || 'Working...'
+
+  // Build the live output preview (last 3 lines from command output or streaming)
+  let previewLines: string[] = []
+  if (activeItem?.outputLines.length) {
+    previewLines = activeItem.outputLines.slice(-3)
+  } else if (streamingText) {
+    previewLines = streamingText
+      .split('\n')
+      .filter(l => l.trim())
+      .slice(-3)
+  }
+
+  // Label based on active entry kind
+  let stateLabel = ''
+  if (activeItem?.entry.kind === 'reasoning') stateLabel = 'Thinking'
+  else if (activeItem?.entry.kind === 'plan') stateLabel = 'Planning'
+  else if (activeItem?.entry.kind === 'response') stateLabel = 'Responding'
+  else if (activeItem?.entry.kind === 'research') stateLabel = 'Researching'
+  else if (activeItem?.entry.kind === 'validation') stateLabel = 'Validating'
+  else if (activeItem?.entry.kind === 'edit') stateLabel = 'Editing'
+  else if (activeItem?.entry.kind === 'execution') stateLabel = 'Executing'
+  else if (activeItem?.entry.kind === 'repository') stateLabel = 'Git'
+  else stateLabel = 'Working'
+
+  const timerStr = elapsed ? `  ${elapsed}` : ''
+  const maxWidth = w - 10 - timerStr.length
+  const displayIntent =
+    intentText.length > maxWidth
+      ? intentText.slice(0, maxWidth - 1) + '…'
+      : intentText
+  const pad = Math.max(
+    1,
+    w - 6 - displayIntent.length - timerStr.length,
+  )
+
+  return (
+    <Box flexDirection="column">
+      <Divider dim />
+      {errorLine}
+      <Text>
+        <Text color="cyan">{'  '}{spinner} </Text>
+        <Text color="white">{displayIntent}</Text>
+        <Text color="gray" dimColor>
+          {' '.repeat(pad)}{timerStr}
+        </Text>
       </Text>
-      {showDetails && entry.detail ? <Text color="gray">  {entry.detail}</Text> : null}
-      {showDetails && entry.raw ? (
-        <Text color="gray">  {truncateText(entry.raw, 220)}</Text>
-      ) : null}
+      {activeItem?.entry.action &&
+        activeItem.entry.action !== activeItem.entry.intent && (
+          <Text color="gray" dimColor>
+            {'    '}
+            {truncate(activeItem.entry.action, w - 8)}
+          </Text>
+        )}
+      {previewLines.map((line, i) => (
+        <Text key={i} color="gray" dimColor>
+          {'    '}
+          {line.length > w - 8 ? line.slice(0, w - 9) + '…' : line}
+        </Text>
+      ))}
     </Box>
   )
 }
+
+function Composer({
+  value,
+  isActive,
+}: {
+  value: string
+  isActive: boolean
+}) {
+  return (
+    <Box flexDirection="column" marginTop={0}>
+      <Divider dim />
+      <Box>
+        {isActive ? (
+          <Text color="cyan">{'⚡ › '}</Text>
+        ) : (
+          <Text color="white">{'› '}</Text>
+        )}
+        <Text>
+          {value || (
+            <Text color="gray" dimColor>
+              {isActive
+                ? 'type to steer the current turn'
+                : 'type a prompt to begin'}
+            </Text>
+          )}
+        </Text>
+        <Text color="white">{'█'}</Text>
+      </Box>
+    </Box>
+  )
+}
+
+function ScrollHint({
+  scrollOffset,
+  totalEntries,
+  viewportSize,
+}: {
+  scrollOffset: number
+  totalEntries: number
+  viewportSize: number
+}) {
+  if (totalEntries <= viewportSize) return null
+  const atBottom = scrollOffset + viewportSize >= totalEntries
+  const atTop = scrollOffset === 0
+  return (
+    <Box justifyContent="space-between">
+      <Text color="gray" dimColor>
+        {!atTop
+          ? `  ↑ ${scrollOffset} more above`
+          : ''}
+      </Text>
+      <Text color="gray" dimColor>
+        {!atBottom
+          ? `${totalEntries - scrollOffset - viewportSize} more below ↓  `
+          : ''}
+      </Text>
+    </Box>
+  )
+}
+
+// ─── App ─────────────────────────────────────────────────────────────────────
 
 function App() {
   const { exit } = useApp()
   const args = useMemo(() => parseArgs(process.argv.slice(2)), [])
+
+  // All entries (full history)
   const [entries, setEntries] = useState<FeedEntry[]>([])
+
+  // Active item (shown in Now panel)
+  const [activeItem, setActiveItem] = useState<ActiveItem | null>(null)
+  const activeItemRef = useRef<ActiveItem | null>(null)
+
+  // Streaming text (agent message / reasoning deltas)
+  const [streamingText, setStreamingText] = useState('')
+
+  // Session state
   const [threadId, setThreadId] = useState<string | null>(null)
   const [threadStatus, setThreadStatus] = useState('starting')
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null)
+
+  // UI state
   const [composer, setComposer] = useState('')
-  const [showDetails, setShowDetails] = useState(false)
   const [errorText, setErrorText] = useState<string | null>(null)
-  const [streamingMessage, setStreamingMessage] = useState('')
-  const [backendLog, setBackendLog] = useState<string[]>([])
-  const [gitBranch, setGitBranch] = useState<string>('')
-  const [resumeInfo, setResumeInfo] = useState<string>('')
+  const [gitBranch, setGitBranch] = useState('')
+
+  // Scroll state
+  const [scrollOffset, setScrollOffset] = useState(0)
+  const [autoScroll, setAutoScroll] = useState(true)
+
   const initialPromptSent = useRef(false)
   const clientRef = useRef<AppServerClient | null>(null)
 
+  // Keep ref in sync with state
+  useEffect(() => {
+    activeItemRef.current = activeItem
+  }, [activeItem])
+
+  // Push an entry to history
+  const pushEntry = useCallback((entry: FeedEntry) => {
+    setEntries(prev => [...prev, entry])
+  }, [])
+
+  // Flush current active item to history
+  const flushActive = useCallback(() => {
+    const current = activeItemRef.current
+    if (current) {
+      setEntries(prev => [...prev, current.entry])
+      activeItemRef.current = null
+    }
+    setActiveItem(null)
+  }, [])
+
+  // Auto-scroll: when entries change, scroll to bottom if autoScroll is on
+  useEffect(() => {
+    if (autoScroll) {
+      const maxOffset = Math.max(0, entries.length - VIEWPORT_SIZE)
+      setScrollOffset(maxOffset)
+    }
+  }, [entries.length, autoScroll])
+
+  // ── Backend connection ──
   useEffect(() => {
     const binary = backendBinary()
     const client = new AppServerClient(binary)
     clientRef.current = client
 
-    const unlistenNotification = client.onNotification(async message => {
+    const unlisten = client.onNotification(message => {
       try {
+        // ── Thread lifecycle ──
         if (message.method === 'thread/started') {
-          const nextThreadId = (message.params as any)?.thread?.id
-          if (nextThreadId) {
-            setThreadId(nextThreadId)
+          const tid = (message.params as any)?.thread?.id
+          if (tid) {
+            setThreadId(tid)
             setThreadStatus('idle')
-            setEntries(current =>
-              upsertEntry(current, {
-                id: `thread-${nextThreadId}`,
-                phase: 'Session',
-                workstream: 'Thread',
-                icon: '🚀',
-                title: 'Thread started',
-                summary: (message.params as any)?.thread?.cwd || args.cwd,
-                status: 'info',
-                timestamp: Date.now(),
-                kind: 'thread',
-              }),
-            )
+            pushEntry({
+              id: `session-${tid}`,
+              intent: `Session started`,
+              kind: 'session',
+              timestamp: Date.now(),
+            })
           }
           return
         }
 
         if (message.method === 'thread/status/changed') {
-          const status = (message.params as any)?.status?.type || 'unknown'
-          setThreadStatus(status)
+          setThreadStatus(
+            (message.params as any)?.status?.type || 'unknown',
+          )
           return
         }
 
+        // ── Turn lifecycle ──
         if (message.method === 'turn/started') {
           const turn = (message.params as any)?.turn
           setActiveTurnId(turn?.id || null)
@@ -889,57 +1030,125 @@ function App() {
         }
 
         if (message.method === 'turn/completed') {
+          flushActive()
           setActiveTurnId(null)
           setThreadStatus('idle')
-          setStreamingMessage('')
+          setStreamingText('')
           return
         }
 
+        // ── Delta streams ──
         if (message.method === 'item/agentMessage/delta') {
-          setStreamingMessage(current => current + String((message.params as any)?.delta || ''))
+          const delta = String(
+            (message.params as any)?.delta || '',
+          )
+          setStreamingText(prev => prev + delta)
           return
         }
 
-        if (message.method === 'item/started' || message.method === 'item/completed') {
-          const item = (message.params as any)?.item
-          const entry = toFeedEntryFromItem(
-            item,
-            message.method === 'item/started' ? 'active' : undefined,
+        if (
+          message.method === 'item/reasoning/summaryTextDelta' ||
+          message.method === 'item/plan/delta'
+        ) {
+          const delta = String(
+            (message.params as any)?.delta || '',
           )
+          setStreamingText(prev => prev + delta)
+          return
+        }
+
+        if (
+          message.method === 'item/commandExecution/outputDelta'
+        ) {
+          const delta = String(
+            (message.params as any)?.delta || '',
+          )
+          if (delta && activeItemRef.current) {
+            const newLines = delta.split('\n').filter(Boolean)
+            const combined = [
+              ...activeItemRef.current.outputLines,
+              ...newLines,
+            ].slice(-3)
+            const updated = {
+              ...activeItemRef.current,
+              outputLines: combined,
+            }
+            activeItemRef.current = updated
+            setActiveItem(updated)
+          }
+          return
+        }
+
+        // ── Item lifecycle ──
+        if (message.method === 'item/started') {
+          const item = (message.params as any)?.item
+          const entry = itemToFeedEntry(item)
           if (entry) {
-            setEntries(current => upsertEntry(current, entry))
+            // Flush previous active item to history
+            flushActive()
+            const newActive: ActiveItem = {
+              entry,
+              startTime: Date.now(),
+              outputLines: [],
+            }
+            activeItemRef.current = newActive
+            setActiveItem(newActive)
+            setStreamingText('')
+          }
+          return
+        }
+
+        if (message.method === 'item/completed') {
+          const item = (message.params as any)?.item
+          const entry = itemToFeedEntry(item)
+          if (entry) {
+            pushEntry(entry)
+            // Clear active if it matches
+            if (activeItemRef.current?.entry.id === entry.id) {
+              activeItemRef.current = null
+              setActiveItem(null)
+            }
             if (item?.type === 'agentMessage') {
-              setStreamingMessage('')
+              setStreamingText('')
             }
           }
           return
         }
 
+        // ── Errors ──
         if (message.method === 'error') {
           const error = (message.params as any)?.error
-          const detail = [error?.message, error?.additionalDetails]
+          const msg = [error?.message, error?.additionalDetails]
             .filter(Boolean)
             .join(' · ')
-          setErrorText(detail || 'Unknown server error')
+          setErrorText(msg || 'Unknown error')
+          pushEntry({
+            id: `error-${Date.now()}`,
+            intent: msg || 'Unknown error',
+            kind: 'session',
+            timestamp: Date.now(),
+            isError: true,
+            isWarning: true,
+          })
         }
-      } catch (error) {
-        setErrorText(String(error))
+      } catch (err) {
+        setErrorText(String(err))
       }
     })
 
-    const unlistenStderr = client.onStderr(line => {
-      setBackendLog(current => [...current.slice(-4), line])
-    })
-
     const unlistenExit = client.onExit(code => {
-      setErrorText(`Backend exited with code ${code ?? 'unknown'}`)
+      setErrorText(`Backend exited (${code ?? 'unknown'})`)
     })
 
+    // Initialize session
     ;(async () => {
       try {
         await client.initialize()
         const threadIdToResume =
-          args.resumeThreadId || (args.resumeLast ? await resolveResumeThreadId(client, args.cwd) : undefined)
+          args.resumeThreadId ||
+          (args.resumeLast
+            ? await resolveResumeThreadId(client, args.cwd)
+            : undefined)
 
         const response = threadIdToResume
           ? ((await client.request('thread/resume', {
@@ -960,52 +1169,50 @@ function App() {
               serviceName: 'codex_fork_js_renderer',
             })) as any)
 
-        const startedThreadId = response?.thread?.id
-        if (startedThreadId) setThreadId(startedThreadId)
+        if (response?.thread?.id) setThreadId(response.thread.id)
         if (threadIdToResume && response?.thread) {
           const summary =
             response.thread.name ||
             response.thread.preview ||
-            response.thread.cwd ||
             threadIdToResume
-          setResumeInfo(summary)
-          setEntries(current => [
-            ...current,
-            {
-              id: `resume-${threadIdToResume}`,
-              phase: 'Session',
-              workstream: 'Thread',
-              icon: '↩️',
-              title: 'Session resumed',
-              summary,
-              status: 'info',
-              timestamp: Date.now(),
-              kind: 'thread',
-            },
-          ])
+          pushEntry({
+            id: `resume-${threadIdToResume}`,
+            intent: `Resumed: ${summary}`,
+            kind: 'session',
+            timestamp: Date.now(),
+          })
         }
-        if ((args.resumeLast || args.resumeThreadId) && !threadIdToResume) {
+        if (
+          (args.resumeLast || args.resumeThreadId) &&
+          !threadIdToResume
+        ) {
           setErrorText('No previous session found to resume')
         }
-      } catch (error) {
-        setErrorText(String(error))
+      } catch (err) {
+        setErrorText(String(err))
       }
     })()
 
     return () => {
-      unlistenNotification()
-      unlistenStderr()
+      unlisten()
       unlistenExit()
       client.close()
     }
   }, [args.cwd, args.model])
 
+  // Auto-submit initial prompt
   useEffect(() => {
-    if (initialPromptSent.current || !threadId || !args.initialPrompt) return
+    if (
+      initialPromptSent.current ||
+      !threadId ||
+      !args.initialPrompt
+    )
+      return
     initialPromptSent.current = true
     void submitPrompt(args.initialPrompt)
   }, [threadId, args.initialPrompt])
 
+  // Git branch detection
   useEffect(() => {
     try {
       const branch = execFileSync(
@@ -1022,25 +1229,18 @@ function App() {
   const submitPrompt = async (promptText: string) => {
     const client = clientRef.current
     if (!client || !threadId) return
-
     const text = promptText.trim()
     if (!text) return
 
-    setEntries(current => [
-      ...current,
-      {
-        id: `user-${Date.now()}`,
-        phase: 'Session',
-        workstream: 'User input',
-        icon: '🙂',
-        title: 'You',
-        summary: text,
-        status: 'info',
-        timestamp: Date.now(),
-        kind: 'user',
-      },
-    ])
+    // Add user message to feed
+    pushEntry({
+      id: `user-${Date.now()}`,
+      intent: text,
+      kind: 'user',
+      timestamp: Date.now(),
+    })
     setComposer('')
+    setAutoScroll(true)
 
     try {
       if (activeTurnId) {
@@ -1061,153 +1261,147 @@ function App() {
         setActiveTurnId(response?.turn?.id || null)
       }
       setThreadStatus('active')
-    } catch (error) {
-      setErrorText(String(error))
+    } catch (err) {
+      setErrorText(String(err))
     }
   }
 
+  // ── Input handling ──
   useInput((input, key) => {
+    // Quit
     if (key.ctrl && input === 'c') {
       exit()
       return
     }
 
-    if (key.ctrl && input === 'y') {
-      setShowDetails(current => !current)
+    // Scroll up
+    if (key.ctrl && input === 'u') {
+      setAutoScroll(false)
+      setScrollOffset(prev => Math.max(0, prev - SCROLL_STEP))
       return
     }
 
+    // Scroll down
+    if (key.ctrl && input === 'd') {
+      setAutoScroll(false)
+      setScrollOffset(prev => {
+        const max = Math.max(0, entries.length - VIEWPORT_SIZE)
+        const next = Math.min(max, prev + SCROLL_STEP)
+        if (next >= max) setAutoScroll(true)
+        return next
+      })
+      return
+    }
+
+    // Page up
+    if (key.pageUp || (key.upArrow && key.shift)) {
+      setAutoScroll(false)
+      setScrollOffset(prev => Math.max(0, prev - SCROLL_STEP))
+      return
+    }
+
+    // Page down
+    if (key.pageDown || (key.downArrow && key.shift)) {
+      setAutoScroll(false)
+      setScrollOffset(prev => {
+        const max = Math.max(0, entries.length - VIEWPORT_SIZE)
+        const next = Math.min(max, prev + SCROLL_STEP)
+        if (next >= max) setAutoScroll(true)
+        return next
+      })
+      return
+    }
+
+    // Jump to bottom
+    if (key.ctrl && input === 'g') {
+      setAutoScroll(true)
+      setScrollOffset(Math.max(0, entries.length - VIEWPORT_SIZE))
+      return
+    }
+
+    // Submit prompt
     if (key.return) {
       void submitPrompt(composer)
       return
     }
 
+    // Delete character
     if (key.backspace || key.delete) {
-      setComposer(current => current.slice(0, -1))
+      setComposer(prev => prev.slice(0, -1))
       return
     }
 
+    // Clear input
     if (key.escape) {
       setComposer('')
       return
     }
 
+    // Type character
     if (!key.ctrl && !key.meta && input) {
-      setComposer(current => current + input)
+      setComposer(prev => prev + input)
     }
   })
 
-  const collapsedEntries = useMemo(() => collapseEntries(entries), [entries])
-  const objective = [...collapsedEntries]
-    .reverse()
-    .find(entry => entry.kind === 'user')
-    ?.summary || resumeInfo
-  const activityEntries = collapsedEntries.filter(
-    entry => !['user', 'message', 'reasoning', 'plan', 'thread'].includes(entry.kind),
-  )
-  const recentActivity = activityEntries.slice(-6)
-  const hiddenCount = Math.max(0, activityEntries.length - recentActivity.length)
-  const focusEntry = [...collapsedEntries]
-    .reverse()
-    .find(entry =>
-      ['command', 'fileChange', 'mcp', 'webSearch', 'review'].includes(entry.kind) ||
-      entry.status === 'active',
-    ) || [...collapsedEntries].reverse().find(entry => !['user', 'thread'].includes(entry.kind))
-  const currentPhase = focusEntry?.phase || 'Session'
-  const currentWorkstream = focusEntry?.workstream || 'Thread'
-  const currentAction = focusEntry?.summary || focusEntry?.title || 'Waiting for work'
-  const phaseStyle = PHASE_STYLES[currentPhase]
-  const latestSignals = Array.from(
-    new Set(
-      [
-        ...extractTakeaways(streamingMessage, 2),
-        ...collapsedEntries
-          .filter(entry => entry.kind === 'message')
-          .map(entry => entry.summary || '')
-          .filter(Boolean)
-          .reverse(),
-      ].filter(Boolean),
-    ),
-  ).slice(0, 3)
+  // ── Visible entries (viewport window) ──
+  const visibleEntries = useMemo(() => {
+    const start = Math.max(0, scrollOffset)
+    return entries.slice(start, start + VIEWPORT_SIZE)
+  }, [entries, scrollOffset])
+
+  // ── Shortcut help ──
+  const helpText =
+    entries.length > VIEWPORT_SIZE
+      ? 'Ctrl+U/D scroll · Ctrl+G bottom · Ctrl+C quit'
+      : 'Ctrl+C quit'
 
   return (
     <Box flexDirection="column">
-      <SummaryPanel title="Overview" accentColor={phaseStyle.accent}>
-        <MetricRow
-          label="Focus"
-          value={`${phaseStyle.icon} ${currentPhase} · ${currentWorkstream}`}
-          color={phaseStyle.color}
-        />
-        <MetricRow
-          label="Current"
-          value={truncateText(currentAction, 140)}
-          color="white"
-        />
-        <MetricRow
-          label="Objective"
-          value={truncateText(objective || 'No prompt yet', 140)}
-          color="white"
-        />
-        {resumeInfo ? (
-          <MetricRow
-            label="Resumed"
-            value={truncateText(resumeInfo, 140)}
-            color="cyanBright"
-          />
-        ) : null}
-        <MetricRow
-          label="Status"
-          value={`thread ${threadStatus}${gitBranch ? ` · git ${gitBranch}` : ''} · details ${showDetails ? 'on' : 'off'}`}
-          color="gray"
-        />
-      </SummaryPanel>
-
-      {latestSignals.length > 0 ? (
-        <SummaryPanel title="Signal" accentColor="green">
-          {latestSignals.map(signal => (
-            <Text key={signal}>
-              <Text color="green">• </Text>
-              <Text color="white">{truncateText(signal, 150)}</Text>
-            </Text>
-          ))}
-        </SummaryPanel>
-      ) : null}
-
-      <SectionTitle title="Recent activity" hint={hiddenCount > 0 ? `${hiddenCount} older hidden` : undefined} />
-      <Divider />
-      {recentActivity.length > 0 ? (
-        recentActivity.map(entry => (
-          <ActivityRow key={`${entry.id}-${entry.timestamp}`} entry={entry} showDetails={showDetails} />
-        ))
-      ) : (
-        <Text color="gray">No high-signal activity yet.</Text>
-      )}
-
-      {errorText ? (
-        <Box flexDirection="column" marginTop={1}>
-          <Text color="redBright">⚠️ Error</Text>
-          <Text color="gray">{truncateText(errorText, 220)}</Text>
-        </Box>
-      ) : null}
-
-      {showDetails && backendLog.length > 0 ? (
-        <Box flexDirection="column" marginTop={1}>
-          <Text color="gray">Backend log</Text>
-          {backendLog.slice(-2).map((lineText, index) => (
-            <Text key={`${lineText}-${index}`} color="gray">
-              {truncateText(lineText, 220)}
-            </Text>
-          ))}
-        </Box>
-      ) : null}
-
-      <Box marginTop={1} flexDirection="column">
-        <Divider />
-        <Text color="gray">Ctrl+Y raw details · Enter send · Esc clear · Ctrl+C quit</Text>
-        <Text color="greenBright">
-          › {composer || 'Type a prompt to start or steer the current turn'}
+      {/* ── Header ── */}
+      <Box marginBottom={0}>
+        <Text color="gray" dimColor>
+          {'  codex-fork'}
+          {gitBranch ? ` · ${gitBranch}` : ''}
+          {args.model ? ` · ${args.model}` : ''}
         </Text>
       </Box>
+      <Divider dim />
+
+      {/* ── Scroll hint (top) ── */}
+      <ScrollHint
+        scrollOffset={scrollOffset}
+        totalEntries={entries.length}
+        viewportSize={VIEWPORT_SIZE}
+      />
+
+      {/* ── Feed ── */}
+      {visibleEntries.length > 0 ? (
+        visibleEntries.map(entry => (
+          <EntryView key={entry.id} entry={entry} />
+        ))
+      ) : (
+        <Text color="gray" dimColor>
+          {'  '}No activity yet.
+        </Text>
+      )}
+
+      {/* ── Now panel ── */}
+      <NowPanel
+        activeItem={activeItem}
+        streamingText={streamingText}
+        threadStatus={threadStatus}
+        gitBranch={gitBranch}
+        model={args.model}
+        errorText={errorText}
+      />
+
+      {/* ── Composer ── */}
+      <Composer value={composer} isActive={!!activeTurnId} />
+
+      {/* ── Help ── */}
+      <Text color="gray" dimColor>
+        {'  '}{helpText}
+      </Text>
     </Box>
   )
 }
