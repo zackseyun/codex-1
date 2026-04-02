@@ -222,6 +222,7 @@ function parseArgs(argv: string[]) {
   let resumeThreadId: string | undefined
   let resumeLast = false
   let listSessions = false
+  let interactiveResume = false
   const prompt: string[] = []
 
   for (let i = 0; i < argv.length; i++) {
@@ -240,6 +241,9 @@ function parseArgs(argv: string[]) {
       resumeLast = true
     } else if (arg === '--list') {
       listSessions = true
+    } else if (arg === 'resume' && i === 0) {
+      // "codex-fork-ui resume" as a subcommand
+      interactiveResume = true
     } else {
       prompt.push(arg)
     }
@@ -251,6 +255,7 @@ function parseArgs(argv: string[]) {
     resumeThreadId,
     resumeLast,
     listSessions,
+    interactiveResume,
     initialPrompt: prompt.join(' ').trim(),
   }
 }
@@ -1746,7 +1751,204 @@ function App() {
   )
 }
 
-// ─── --list mode: print recent sessions and exit ─────────────────────────────
+// ─── Resume Picker ───────────────────────────────────────────────────────────
+
+type ThreadInfo = {
+  id: string
+  name: string
+  date: string
+  cwd: string
+}
+
+function ResumePicker({ onSelect }: { onSelect: (threadId: string) => void }) {
+  const { exit } = useApp()
+  const args = useMemo(() => parseArgs(process.argv.slice(2)), [])
+  const [threads, setThreads] = useState<ThreadInfo[]>([])
+  const [selected, setSelected] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const clientRef = useRef<AppServerClient | null>(null)
+
+  useEffect(() => {
+    const binary = backendBinary()
+    const client = new AppServerClient(binary)
+    clientRef.current = client
+
+    ;(async () => {
+      try {
+        await client.initialize()
+        const result = (await client.request('thread/list', {
+          limit: 15,
+          sortKey: 'updated_at',
+          archived: false,
+        })) as any
+        const data = result?.data || []
+        setThreads(
+          data.map((t: any) => ({
+            id: t.id,
+            name: t.name || t.preview || '(untitled)',
+            date: t.updated_at
+              ? new Date(t.updated_at).toLocaleString()
+              : '',
+            cwd: t.cwd || '',
+          })),
+        )
+      } catch (err) {
+        setError(String(err))
+      } finally {
+        setLoading(false)
+      }
+    })()
+
+    return () => client.close()
+  }, [])
+
+  useInput((input, key) => {
+    if (key.ctrl && input === 'c') {
+      clientRef.current?.close()
+      exit()
+      return
+    }
+    if (key.escape) {
+      clientRef.current?.close()
+      exit()
+      return
+    }
+    if (key.upArrow) {
+      setSelected(prev => Math.max(0, prev - 1))
+      return
+    }
+    if (key.downArrow) {
+      setSelected(prev => Math.min(threads.length - 1, prev + 1))
+      return
+    }
+    if (key.return && threads.length > 0) {
+      const thread = threads[selected]
+      if (thread) {
+        clientRef.current?.close()
+        onSelect(thread.id)
+      }
+      return
+    }
+    // Number keys for quick selection
+    const num = parseInt(input, 10)
+    if (num >= 1 && num <= threads.length) {
+      const thread = threads[num - 1]
+      if (thread) {
+        clientRef.current?.close()
+        onSelect(thread.id)
+      }
+    }
+  })
+
+  if (loading) {
+    return (
+      <Box flexDirection="column" paddingX={2} paddingY={1}>
+        <Text color="gray">Loading sessions...</Text>
+      </Box>
+    )
+  }
+
+  if (error) {
+    return (
+      <Box flexDirection="column" paddingX={2} paddingY={1}>
+        <Text color="yellow">Failed to load sessions: {error}</Text>
+      </Box>
+    )
+  }
+
+  if (!threads.length) {
+    return (
+      <Box flexDirection="column" paddingX={2} paddingY={1}>
+        <Text color="gray">No saved sessions found.</Text>
+        <Text color="gray" dimColor>Press Esc to start a new session.</Text>
+      </Box>
+    )
+  }
+
+  return (
+    <Box flexDirection="column" paddingX={2} paddingY={1}>
+      <Text color="white" bold>Resume a session</Text>
+      <Text color="gray" dimColor>
+        Arrow keys to navigate · Enter to select · Number for quick pick · Esc to cancel
+      </Text>
+      <Text>{''}</Text>
+      {threads.map((t, i) => {
+        const isSelected = i === selected
+        return (
+          <Box key={t.id} flexDirection="column" marginBottom={0}>
+            <Text>
+              <Text color={isSelected ? 'cyan' : 'gray'}>
+                {isSelected ? '  ❯ ' : '    '}
+              </Text>
+              <Text color={isSelected ? 'white' : 'gray'} bold={isSelected}>
+                {i + 1}. {truncate(t.name, 60)}
+              </Text>
+            </Text>
+            <Text color="gray" dimColor>
+              {'      '}{t.date}{t.cwd ? `  ${t.cwd}` : ''}
+            </Text>
+          </Box>
+        )
+      })}
+    </Box>
+  )
+}
+
+// ─── Entry Point ─────────────────────────────────────────────────────────────
+
+function Root() {
+  const cliArgs = useMemo(() => parseArgs(process.argv.slice(2)), [])
+  const [resumeThreadId, setResumeThreadId] = useState<string | null>(null)
+  const [showPicker, setShowPicker] = useState(cliArgs.interactiveResume)
+
+  if (showPicker && !resumeThreadId) {
+    return (
+      <ResumePicker
+        onSelect={(id) => {
+          setResumeThreadId(id)
+          setShowPicker(false)
+        }}
+      />
+    )
+  }
+
+  // If we got a thread ID from the picker, override the args
+  if (resumeThreadId) {
+    // Patch process.argv to inject --resume
+    const patchedArgv = [...process.argv.slice(2).filter(a => a !== 'resume'), '--resume', resumeThreadId]
+    // Re-render App — it will read the resume thread ID
+    return <AppWithOverride resumeOverride={resumeThreadId} />
+  }
+
+  return <App />
+}
+
+function AppWithOverride({ resumeOverride }: { resumeOverride: string }) {
+  // This is the App component but with the resume thread ID injected.
+  // We re-use App by setting an env var that parseArgs will read.
+  // Simpler: just render App and override via a ref.
+  // Actually, the cleanest way is to make App accept an optional override prop.
+  // But to minimize changes, let's just re-exec with the right args.
+
+  // Re-launch the process with --resume <id>
+  useEffect(() => {
+    const currentArgs = process.argv.slice(2).filter(a => a !== 'resume')
+    const binary = process.argv[0]
+    const script = process.argv[1]
+    const child = spawn(binary!, [script!, ...currentArgs, '--resume', resumeOverride], {
+      stdio: 'inherit',
+      env: process.env,
+    })
+    child.on('exit', (code) => process.exit(code ?? 0))
+  }, [resumeOverride])
+
+  return (
+    <Box paddingX={2} paddingY={1}>
+      <Text color="gray">Resuming session...</Text>
+    </Box>
+  )
+}
 
 const cliArgs = parseArgs(process.argv.slice(2))
 
@@ -1793,5 +1995,5 @@ if (cliArgs.listSessions) {
     }
   })()
 } else {
-  render(<App />)
+  render(<Root />)
 }

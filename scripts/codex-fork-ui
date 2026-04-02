@@ -14,6 +14,7 @@ codex-fork-ui — JavaScript terminal renderer for codex-fork
 
 Usage:
   codex-fork-ui [options] [prompt]
+  codex-fork-ui resume              Interactive session picker
 
 Options:
   -h, --help           Show this help
@@ -47,6 +48,7 @@ Examples:
   codex-fork-ui
   codex-fork-ui "summarize this repo"
   codex-fork-ui --last
+  codex-fork-ui resume
   codex-fork-ui --list
   codex-fork-ui --resume thread_abc123
   codex-fork-ui -C /path/to/repo --last
