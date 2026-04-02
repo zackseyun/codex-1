@@ -983,7 +983,7 @@ function ScrollHint({
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 
-function App() {
+function App({ resumeOverride }: { resumeOverride?: string } = {}) {
   const { exit } = useApp()
   const args = useMemo(() => parseArgs(process.argv.slice(2)), [])
 
@@ -1197,6 +1197,7 @@ function App() {
       try {
         await client.initialize()
         const threadIdToResume =
+          resumeOverride ||
           args.resumeThreadId ||
           (args.resumeLast
             ? await resolveResumeThreadId(client, args.cwd)
@@ -1899,55 +1900,21 @@ function ResumePicker({ onSelect }: { onSelect: (threadId: string) => void }) {
 
 function Root() {
   const cliArgs = useMemo(() => parseArgs(process.argv.slice(2)), [])
-  const [resumeThreadId, setResumeThreadId] = useState<string | null>(null)
+  const [pickedThreadId, setPickedThreadId] = useState<string | null>(null)
   const [showPicker, setShowPicker] = useState(cliArgs.interactiveResume)
 
-  if (showPicker && !resumeThreadId) {
+  if (showPicker && !pickedThreadId) {
     return (
       <ResumePicker
         onSelect={(id) => {
-          setResumeThreadId(id)
+          setPickedThreadId(id)
           setShowPicker(false)
         }}
       />
     )
   }
 
-  // If we got a thread ID from the picker, override the args
-  if (resumeThreadId) {
-    // Patch process.argv to inject --resume
-    const patchedArgv = [...process.argv.slice(2).filter(a => a !== 'resume'), '--resume', resumeThreadId]
-    // Re-render App — it will read the resume thread ID
-    return <AppWithOverride resumeOverride={resumeThreadId} />
-  }
-
-  return <App />
-}
-
-function AppWithOverride({ resumeOverride }: { resumeOverride: string }) {
-  // This is the App component but with the resume thread ID injected.
-  // We re-use App by setting an env var that parseArgs will read.
-  // Simpler: just render App and override via a ref.
-  // Actually, the cleanest way is to make App accept an optional override prop.
-  // But to minimize changes, let's just re-exec with the right args.
-
-  // Re-launch the process with --resume <id>
-  useEffect(() => {
-    const currentArgs = process.argv.slice(2).filter(a => a !== 'resume')
-    const binary = process.argv[0]
-    const script = process.argv[1]
-    const child = spawn(binary!, [script!, ...currentArgs, '--resume', resumeOverride], {
-      stdio: 'inherit',
-      env: process.env,
-    })
-    child.on('exit', (code) => process.exit(code ?? 0))
-  }, [resumeOverride])
-
-  return (
-    <Box paddingX={2} paddingY={1}>
-      <Text color="gray">Resuming session...</Text>
-    </Box>
-  )
+  return <App resumeOverride={pickedThreadId || undefined} />
 }
 
 const cliArgs = parseArgs(process.argv.slice(2))
