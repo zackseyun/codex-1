@@ -459,6 +459,59 @@ function summarizeMcpTool(item: any) {
   return `${server}.${tool}`
 }
 
+function normalizeWhitespace(text: string) {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function truncateText(text: string, maxChars = 120) {
+  const normalized = normalizeWhitespace(text)
+  if (normalized.length <= maxChars) return normalized
+  return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`
+}
+
+function extractTakeaways(text: string, maxItems = 3) {
+  const normalized = String(text || '').replace(/\r/g, '')
+  if (!normalized.trim()) return []
+
+  const cleanedLines = normalized
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line =>
+      line
+        .replace(/^[-*•]\s+/, '')
+        .replace(/^\d+[.)]\s+/, '')
+        .replace(/^#+\s+/, '')
+        .trim(),
+    )
+    .filter(line => line && !(line.endsWith(':') && line.length < 48))
+    .map(line => truncateText(line, 160))
+
+  if (cleanedLines.length > 1) {
+    return cleanedLines.slice(0, maxItems)
+  }
+
+  return normalized
+    .split(/(?<=[.!?])\s+/)
+    .map(sentence => truncateText(sentence, 160))
+    .filter(Boolean)
+    .slice(0, maxItems)
+}
+
+function primaryTakeaway(text: string) {
+  return extractTakeaways(text, 1)[0] || ''
+}
+
+function secondaryTakeawayText(text: string) {
+  const rest = extractTakeaways(text, 3).slice(1)
+  return rest.length ? rest.join(' • ') : undefined
+}
+
+function compactErrorText(text: string | null | undefined) {
+  if (!text) return undefined
+  return truncateText(text, 180)
+}
+
 function toFeedEntryFromItem(item: any, statusOverride?: FeedStatus): FeedEntry | null {
   if (!item || !item.type) return null
   const timestamp = Date.now()
@@ -468,13 +521,17 @@ function toFeedEntryFromItem(item: any, statusOverride?: FeedStatus): FeedEntry 
   }
 
   if (item.type === 'plan') {
+    const summary = primaryTakeaway(String(item.text || ''))
+    if (!summary) return null
     return {
       id: item.id,
       phase: 'Planning',
       workstream: 'Plan',
       icon: '🧠',
       title: 'Plan update',
-      summary: String(item.text || '').trim(),
+      summary,
+      detail: secondaryTakeawayText(String(item.text || '')),
+      raw: String(item.text || '').trim() || undefined,
       status: statusOverride ?? 'info',
       timestamp,
       kind: 'plan',
@@ -482,9 +539,11 @@ function toFeedEntryFromItem(item: any, statusOverride?: FeedStatus): FeedEntry 
   }
 
   if (item.type === 'reasoning') {
-    const summary = Array.isArray(item.summary)
-      ? item.summary.join(' • ')
+    const rawReasoning = Array.isArray(item.summary)
+      ? item.summary.join('\n')
       : String(item.content || '')
+    const summary = primaryTakeaway(rawReasoning)
+    if (!summary) return null
     return {
       id: item.id,
       phase: 'Planning',
@@ -492,6 +551,8 @@ function toFeedEntryFromItem(item: any, statusOverride?: FeedStatus): FeedEntry 
       icon: '🧠',
       title: 'Reasoning',
       summary,
+      detail: secondaryTakeawayText(rawReasoning),
+      raw: rawReasoning || undefined,
       status: statusOverride ?? 'info',
       timestamp,
       kind: 'reasoning',
@@ -499,6 +560,9 @@ function toFeedEntryFromItem(item: any, statusOverride?: FeedStatus): FeedEntry 
   }
 
   if (item.type === 'agentMessage') {
+    const text = String(item.text || '')
+    const summary = primaryTakeaway(text)
+    if (!summary) return null
     return {
       id: item.id,
       phase: 'Responding',
@@ -506,8 +570,10 @@ function toFeedEntryFromItem(item: any, statusOverride?: FeedStatus): FeedEntry 
         item.phase === 'final_answer' ? 'Final answer' : 'Commentary',
       icon: item.phase === 'final_answer' ? '✅' : '💬',
       title:
-        item.phase === 'final_answer' ? 'Final answer' : 'Assistant update',
-      summary: String(item.text || '').trim(),
+        item.phase === 'final_answer' ? 'Final answer' : 'Takeaway',
+      summary,
+      detail: secondaryTakeawayText(text),
+      raw: text || undefined,
       status: statusOverride ?? 'done',
       timestamp,
       kind: 'message',
@@ -526,10 +592,11 @@ function toFeedEntryFromItem(item: any, statusOverride?: FeedStatus): FeedEntry 
           : item.status === 'inProgress'
             ? 'active'
             : 'done'),
-      detail:
+      detail: compactErrorText(
         item.status === 'failed' && item.aggregatedOutput
           ? String(item.aggregatedOutput).trim()
           : undefined,
+      ),
       timestamp,
     }
   }
@@ -583,30 +650,24 @@ function toFeedEntryFromItem(item: any, statusOverride?: FeedStatus): FeedEntry 
   }
 
   if (item.type === 'enteredReviewMode' || item.type === 'exitedReviewMode') {
+    const summary = primaryTakeaway(String(item.review || ''))
+    if (!summary) return null
     return {
       id: item.id,
       phase: 'Review',
       workstream: 'Review',
       icon: '🛡️',
       title: item.type === 'enteredReviewMode' ? 'Entered review' : 'Exited review',
-      summary: String(item.review || ''),
+      summary,
+      detail: secondaryTakeawayText(String(item.review || '')),
+      raw: String(item.review || '') || undefined,
       status: statusOverride ?? 'info',
       timestamp,
       kind: 'review',
     }
   }
 
-  return {
-    id: item.id || `${item.type}-${timestamp}`,
-    phase: 'Session',
-    workstream: 'Events',
-    icon: '•',
-    title: item.type,
-    summary: '',
-    status: statusOverride ?? 'info',
-    timestamp,
-    kind: 'misc',
-  }
+  return null
 }
 
 function collapseEntries(entries: FeedEntry[]) {
@@ -651,11 +712,64 @@ function statusColor(status: FeedStatus) {
   return 'gray'
 }
 
-function divider(width: number) {
-  return '━'.repeat(Math.max(24, Math.min(width - 2, 72)))
+function mutedColorForEntry(entry: CollapsedEntry) {
+  if (entry.status === 'error') return 'redBright'
+  if (entry.status === 'active') return PHASE_STYLES[entry.phase].color
+  return 'white'
 }
 
-function EntryRow({
+function Divider() {
+  const width = process.stdout.columns || 80
+  return <Text color="gray">{'─'.repeat(Math.max(20, Math.min(width - 2, 88)))}</Text>
+}
+
+function SectionTitle({ title, hint }: { title: string; hint?: string }) {
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Text color="gray">
+        {title}
+        {hint ? ` · ${hint}` : ''}
+      </Text>
+    </Box>
+  )
+}
+
+function MetricRow({
+  label,
+  value,
+  color = 'white',
+}: {
+  label: string
+  value: string
+  color?: string
+}) {
+  if (!value) return null
+  return (
+    <Text>
+      <Text color="gray">{label.padEnd(10)}</Text>
+      <Text color={color}>{value}</Text>
+    </Text>
+  )
+}
+
+function SummaryPanel({
+  title,
+  accentColor,
+  children,
+}: {
+  title: string
+  accentColor: string
+  children: React.ReactNode
+}) {
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor={accentColor} paddingX={1} marginTop={1}>
+      <Text color={accentColor}>{title}</Text>
+      <Box flexDirection="column">{children}</Box>
+    </Box>
+  )
+}
+
+function ActivityRow({
   entry,
   showDetails,
 }: {
@@ -663,44 +777,19 @@ function EntryRow({
   showDetails: boolean
 }) {
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      <Text color={statusColor(entry.status)}>
-        {entry.icon} {entry.title}
-        {entry.repeatCount > 1 ? ` ×${entry.repeatCount}` : ''}
-      </Text>
-      {entry.summary ? (
-        <Text color={PHASE_STYLES[entry.phase].accent}>
-          └ {entry.summary}
-        </Text>
-      ) : null}
-      {showDetails && entry.raw ? (
-        <Text color="gray">  {entry.raw}</Text>
-      ) : null}
-      {showDetails && entry.detail ? (
-        <Text color="gray">  {entry.detail}</Text>
-      ) : null}
-    </Box>
-  )
-}
-
-function PhaseBanner({
-  phase,
-  workstream,
-  width,
-}: {
-  phase: FeedPhase
-  workstream: string
-  width: number
-}) {
-  const style = PHASE_STYLES[phase]
-  const line = divider(width)
-  return (
     <Box flexDirection="column" marginTop={1}>
-      <Text color={style.accent}>{line}</Text>
-      <Text color={style.color}>
-        {style.icon} PHASE: {phase} · {workstream}
+      <Text>
+        <Text color={PHASE_STYLES[entry.phase].accent}>{entry.icon} {entry.workstream}</Text>
+        <Text color="gray"> · </Text>
+        <Text color={mutedColorForEntry(entry)}>
+          {truncateText(entry.summary || entry.title, 150)}
+        </Text>
+        {entry.repeatCount > 1 ? <Text color="gray">{` ×${entry.repeatCount}`}</Text> : null}
       </Text>
-      <Text color={style.accent}>{line}</Text>
+      {showDetails && entry.detail ? <Text color="gray">  {entry.detail}</Text> : null}
+      {showDetails && entry.raw ? (
+        <Text color="gray">  {truncateText(entry.raw, 220)}</Text>
+      ) : null}
     </Box>
   )
 }
@@ -893,6 +982,7 @@ function App() {
           sandboxPolicy: { type: 'dangerFullAccess' },
           approvalPolicy: 'never',
           model: args.model ?? null,
+          effort: 'medium',
         })) as any
         setActiveTurnId(response?.turn?.id || null)
       }
@@ -934,88 +1024,105 @@ function App() {
   })
 
   const collapsedEntries = useMemo(() => collapseEntries(entries), [entries])
-  const visibleEntries = collapsedEntries.slice(-MAX_VISIBLE_ENTRIES)
-  const hiddenCount = Math.max(0, collapsedEntries.length - visibleEntries.length)
-  const activeContext = [...visibleEntries]
+  const objective = [...collapsedEntries]
     .reverse()
-    .find(entry => entry.phase !== 'Responding' && entry.phase !== 'Session')
-  const currentPhase = activeContext?.phase || 'Session'
-  const currentWorkstream = activeContext?.workstream || 'Thread'
-  const width = process.stdout.columns || 80
-  const line = divider(width)
+    .find(entry => entry.kind === 'user')
+    ?.summary
+  const activityEntries = collapsedEntries.filter(
+    entry => !['user', 'message', 'reasoning', 'plan', 'thread'].includes(entry.kind),
+  )
+  const recentActivity = activityEntries.slice(-6)
+  const hiddenCount = Math.max(0, activityEntries.length - recentActivity.length)
+  const focusEntry = [...collapsedEntries]
+    .reverse()
+    .find(entry =>
+      ['command', 'fileChange', 'mcp', 'webSearch', 'review'].includes(entry.kind) ||
+      entry.status === 'active',
+    ) || [...collapsedEntries].reverse().find(entry => !['user', 'thread'].includes(entry.kind))
+  const currentPhase = focusEntry?.phase || 'Session'
+  const currentWorkstream = focusEntry?.workstream || 'Thread'
+  const currentAction = focusEntry?.summary || focusEntry?.title || 'Waiting for work'
   const phaseStyle = PHASE_STYLES[currentPhase]
-
-  let lastPhase: FeedPhase | null = null
+  const latestSignals = Array.from(
+    new Set(
+      [
+        ...extractTakeaways(streamingMessage, 2),
+        ...collapsedEntries
+          .filter(entry => entry.kind === 'message')
+          .map(entry => entry.summary || '')
+          .filter(Boolean)
+          .reverse(),
+      ].filter(Boolean),
+    ),
+  ).slice(0, 3)
 
   return (
     <Box flexDirection="column">
-      <Text color={phaseStyle.accent}>{line}</Text>
-      <Text color={phaseStyle.color}>
-        {phaseStyle.icon} Codex Fork JS Renderer · {currentPhase} · {currentWorkstream}
-      </Text>
-      <Text color="gray">
-        CWD: {args.cwd}
-        {gitBranch ? ` · Git: ${gitBranch}` : ''}
-        {' · '}
-        Thread: {threadStatus}
-        {' · '}
-        Raw details: {showDetails ? 'ON' : 'OFF'}
-      </Text>
-      <Text color={phaseStyle.accent}>{line}</Text>
+      <SummaryPanel title="Overview" accentColor={phaseStyle.accent}>
+        <MetricRow
+          label="Focus"
+          value={`${phaseStyle.icon} ${currentPhase} · ${currentWorkstream}`}
+          color={phaseStyle.color}
+        />
+        <MetricRow
+          label="Current"
+          value={truncateText(currentAction, 140)}
+          color="white"
+        />
+        <MetricRow
+          label="Objective"
+          value={truncateText(objective || 'No prompt yet', 140)}
+          color="white"
+        />
+        <MetricRow
+          label="Status"
+          value={`thread ${threadStatus}${gitBranch ? ` · git ${gitBranch}` : ''} · details ${showDetails ? 'on' : 'off'}`}
+          color="gray"
+        />
+      </SummaryPanel>
 
-      {hiddenCount > 0 ? (
-        <Text color="gray">… {hiddenCount} earlier activity groups hidden</Text>
+      {latestSignals.length > 0 ? (
+        <SummaryPanel title="Signal" accentColor="green">
+          {latestSignals.map(signal => (
+            <Text key={signal}>
+              <Text color="green">• </Text>
+              <Text color="white">{truncateText(signal, 150)}</Text>
+            </Text>
+          ))}
+        </SummaryPanel>
       ) : null}
 
-      {visibleEntries.map(entry => {
-        const showBanner = entry.phase !== lastPhase
-        lastPhase = entry.phase
-        return (
-          <React.Fragment key={`${entry.id}-${entry.timestamp}`}>
-            {showBanner ? (
-              <PhaseBanner
-                phase={entry.phase}
-                workstream={entry.workstream}
-                width={width}
-              />
-            ) : null}
-            <EntryRow entry={entry} showDetails={showDetails} />
-          </React.Fragment>
-        )
-      })}
-
-      {streamingMessage ? (
-        <Box flexDirection="column" marginTop={1}>
-          <PhaseBanner
-            phase="Responding"
-            workstream="Streaming response"
-            width={width}
-          />
-          <Text color="white">💬 Assistant update</Text>
-          <Text color="gray">{streamingMessage}</Text>
-        </Box>
-      ) : null}
+      <SectionTitle title="Recent activity" hint={hiddenCount > 0 ? `${hiddenCount} older hidden` : undefined} />
+      <Divider />
+      {recentActivity.length > 0 ? (
+        recentActivity.map(entry => (
+          <ActivityRow key={`${entry.id}-${entry.timestamp}`} entry={entry} showDetails={showDetails} />
+        ))
+      ) : (
+        <Text color="gray">No high-signal activity yet.</Text>
+      )}
 
       {errorText ? (
         <Box flexDirection="column" marginTop={1}>
           <Text color="redBright">⚠️ Error</Text>
-          <Text color="gray">{errorText}</Text>
+          <Text color="gray">{truncateText(errorText, 220)}</Text>
         </Box>
       ) : null}
 
-      {backendLog.length > 0 ? (
+      {showDetails && backendLog.length > 0 ? (
         <Box flexDirection="column" marginTop={1}>
           <Text color="gray">Backend log</Text>
           {backendLog.slice(-2).map((lineText, index) => (
             <Text key={`${lineText}-${index}`} color="gray">
-              {lineText}
+              {truncateText(lineText, 220)}
             </Text>
           ))}
         </Box>
       ) : null}
 
       <Box marginTop={1} flexDirection="column">
-        <Text color="gray">Ctrl+Y toggle raw details · Enter send · Esc clear · Ctrl+C quit</Text>
+        <Divider />
+        <Text color="gray">Ctrl+Y raw details · Enter send · Esc clear · Ctrl+C quit</Text>
         <Text color="greenBright">
           › {composer || 'Type a prompt to start or steer the current turn'}
         </Text>
