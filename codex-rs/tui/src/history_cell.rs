@@ -355,28 +355,29 @@ impl HistoryCell for UserHistoryCell {
             return Vec::new();
         }
 
-        let mut lines: Vec<Line<'static>> = vec![Line::from("").style(style)];
+        let padded_blank = Line::from("   ").style(style);
+        let mut lines: Vec<Line<'static>> = vec![padded_blank.clone()];
 
         if let Some(wrapped_remote_images) = wrapped_remote_images {
             lines.extend(prefix_lines(
                 wrapped_remote_images,
-                "  ".into(),
-                "  ".into(),
+                "   ".into(),
+                "   ".into(),
             ));
             if wrapped_message.is_some() {
-                lines.push(Line::from("").style(style));
+                lines.push(padded_blank.clone());
             }
         }
 
         if let Some(wrapped_message) = wrapped_message {
             lines.extend(prefix_lines(
                 wrapped_message,
-                "› ".bold().dim(),
-                "  ".into(),
+                "  › ".bold().dim(),
+                "    ".into(),
             ));
         }
 
-        lines.push(Line::from("").style(style));
+        lines.push(padded_blank);
         lines
     }
 }
