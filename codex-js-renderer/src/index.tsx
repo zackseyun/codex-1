@@ -596,6 +596,49 @@ function itemToFeedEntry(item: any): FeedEntry | null {
   return null
 }
 
+// ─── Slash Commands ──────────────────────────────────────────────────────────
+
+type SlashCommandDef = {
+  name: string
+  aliases?: string[]
+  description: string
+  needsClient?: boolean
+  availableDuringTask?: boolean
+}
+
+const SLASH_COMMANDS: SlashCommandDef[] = [
+  { name: 'help', description: 'list available commands', availableDuringTask: true },
+  { name: 'resume', description: 'resume a saved session', needsClient: true },
+  { name: 'new', description: 'start a new session', needsClient: true },
+  { name: 'clear', description: 'clear the feed', availableDuringTask: true },
+  { name: 'diff', description: 'show git diff', availableDuringTask: true },
+  { name: 'compact', description: 'compact context to save token space', needsClient: true },
+  { name: 'status', description: 'show session info', availableDuringTask: true },
+  { name: 'copy', description: 'copy last response to clipboard', availableDuringTask: true },
+  { name: 'logout', description: 'log out and quit', needsClient: true },
+  { name: 'quit', description: 'exit', aliases: ['exit'], availableDuringTask: true },
+]
+
+function parseSlashCommand(input: string): { command: string; args: string } | null {
+  const trimmed = input.trim()
+  if (!trimmed.startsWith('/')) return null
+  const spaceIdx = trimmed.indexOf(' ')
+  const command = spaceIdx === -1
+    ? trimmed.slice(1).toLowerCase()
+    : trimmed.slice(1, spaceIdx).toLowerCase()
+  const args = spaceIdx === -1 ? '' : trimmed.slice(spaceIdx + 1).trim()
+  if (!command) return null
+  return { command, args }
+}
+
+function findSlashCommand(name: string): SlashCommandDef | null {
+  for (const cmd of SLASH_COMMANDS) {
+    if (cmd.name === name) return cmd
+    if (cmd.aliases?.includes(name)) return cmd
+  }
+  return null
+}
+
 // ─── Hooks ───────────────────────────────────────────────────────────────────
 
 function useSpinner(active: boolean): string {
@@ -1226,11 +1269,304 @@ function App() {
     }
   }, [args.cwd])
 
+  // ── Slash command handlers ──
+  const handleSlashCommand = async (cmdName: string, cmdArgs: string) => {
+    const client = clientRef.current
+    const cmd = findSlashCommand(cmdName)
+
+    if (!cmd) {
+      pushEntry({
+        id: `cmd-err-${Date.now()}`,
+        intent: `Unknown command: /${cmdName}. Type /help for a list.`,
+        kind: 'session',
+        timestamp: Date.now(),
+        isWarning: true,
+      })
+      return
+    }
+
+    // Check if command is available during active turn
+    if (activeTurnId && !cmd.availableDuringTask) {
+      pushEntry({
+        id: `cmd-err-${Date.now()}`,
+        intent: `/${cmd.name} is not available while a turn is active`,
+        kind: 'session',
+        timestamp: Date.now(),
+        isWarning: true,
+      })
+      return
+    }
+
+    switch (cmd.name) {
+      case 'help': {
+        const lines = SLASH_COMMANDS
+          .map(c => `  /${c.name.padEnd(10)} ${c.description}`)
+          .join('\n')
+        pushEntry({
+          id: `help-${Date.now()}`,
+          intent: 'Available commands:',
+          kind: 'response',
+          timestamp: Date.now(),
+          fullText: `Available commands:\n${lines}`,
+        })
+        break
+      }
+
+      case 'resume': {
+        if (!client) break
+        try {
+          // If an arg is provided, resume that specific thread
+          if (cmdArgs) {
+            const response = (await client.request('thread/resume', {
+              threadId: cmdArgs,
+              cwd: args.cwd,
+              model: args.model ?? null,
+              approvalPolicy: 'never',
+              sandbox: 'danger-full-access',
+              persistExtendedHistory: true,
+            })) as any
+            if (response?.thread?.id) {
+              setThreadId(response.thread.id)
+              setThreadStatus('idle')
+              pushEntry({
+                id: `resume-${Date.now()}`,
+                intent: `Resumed: ${response.thread.name || response.thread.preview || cmdArgs}`,
+                kind: 'session',
+                timestamp: Date.now(),
+              })
+            }
+          } else {
+            // List recent threads
+            const result = (await client.request('thread/list', {
+              limit: 10,
+              sortKey: 'updated_at',
+              archived: false,
+            })) as any
+            const threads = result?.data || []
+            if (!threads.length) {
+              pushEntry({
+                id: `resume-none-${Date.now()}`,
+                intent: 'No saved sessions found.',
+                kind: 'session',
+                timestamp: Date.now(),
+              })
+            } else {
+              const listing = threads
+                .map((t: any, i: number) => {
+                  const name = t.name || t.preview || t.id
+                  const date = t.updated_at
+                    ? new Date(t.updated_at).toLocaleDateString()
+                    : ''
+                  const current = t.id === threadId ? ' (current)' : ''
+                  return `  ${i + 1}. ${truncate(name, 60)}${current}  ${date}\n     /resume ${t.id}`
+                })
+                .join('\n')
+              pushEntry({
+                id: `resume-list-${Date.now()}`,
+                intent: 'Recent sessions — use /resume <id> to switch:',
+                kind: 'response',
+                timestamp: Date.now(),
+                fullText: `Recent sessions:\n${listing}`,
+              })
+            }
+          }
+        } catch (err) {
+          setErrorText(`Resume failed: ${String(err)}`)
+        }
+        break
+      }
+
+      case 'new': {
+        if (!client) break
+        try {
+          flushActive()
+          setStreamingText('')
+          setActiveTurnId(null)
+          const response = (await client.request('thread/start', {
+            cwd: args.cwd,
+            model: args.model ?? null,
+            approvalPolicy: 'never',
+            sandbox: 'danger-full-access',
+            experimentalRawEvents: false,
+            persistExtendedHistory: true,
+            serviceName: 'codex_fork_js_renderer',
+          })) as any
+          if (response?.thread?.id) {
+            setThreadId(response.thread.id)
+            setThreadStatus('idle')
+            setEntries([])
+            pushEntry({
+              id: `session-${response.thread.id}`,
+              intent: 'New session started',
+              kind: 'session',
+              timestamp: Date.now(),
+            })
+          }
+        } catch (err) {
+          setErrorText(`New session failed: ${String(err)}`)
+        }
+        break
+      }
+
+      case 'clear': {
+        setEntries([])
+        setErrorText(null)
+        setScrollOffset(0)
+        setAutoScroll(true)
+        break
+      }
+
+      case 'diff': {
+        try {
+          const diff = execFileSync(
+            'git',
+            ['-C', args.cwd, 'diff', '--stat', 'HEAD'],
+            { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+          ).trim()
+          const untrackedRaw = execFileSync(
+            'git',
+            ['-C', args.cwd, 'ls-files', '--others', '--exclude-standard'],
+            { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+          ).trim()
+          const untracked = untrackedRaw
+            ? `\nUntracked:\n${untrackedRaw}`
+            : ''
+          const output = diff || 'No changes.'
+          pushEntry({
+            id: `diff-${Date.now()}`,
+            intent: 'Git diff:',
+            kind: 'response',
+            timestamp: Date.now(),
+            fullText: `${output}${untracked}`,
+          })
+        } catch {
+          pushEntry({
+            id: `diff-err-${Date.now()}`,
+            intent: 'Not a git repository or git not available',
+            kind: 'session',
+            timestamp: Date.now(),
+            isWarning: true,
+          })
+        }
+        break
+      }
+
+      case 'compact': {
+        if (!client || !threadId) break
+        try {
+          await client.notify('thread/compact', { threadId })
+          pushEntry({
+            id: `compact-${Date.now()}`,
+            intent: 'Context compaction requested',
+            kind: 'session',
+            timestamp: Date.now(),
+          })
+        } catch (err) {
+          setErrorText(`Compact failed: ${String(err)}`)
+        }
+        break
+      }
+
+      case 'status': {
+        const parts = [
+          `Thread: ${threadId || 'none'}`,
+          `Status: ${threadStatus}`,
+          `Branch: ${gitBranch || 'n/a'}`,
+          `Model: ${args.model || 'default'}`,
+          `CWD: ${args.cwd}`,
+          `Entries: ${entries.length}`,
+        ]
+        pushEntry({
+          id: `status-${Date.now()}`,
+          intent: 'Session status:',
+          kind: 'response',
+          timestamp: Date.now(),
+          fullText: parts.join('\n'),
+        })
+        break
+      }
+
+      case 'copy': {
+        const lastResponse = [...entries]
+          .reverse()
+          .find(e => e.kind === 'response')
+        if (!lastResponse) {
+          pushEntry({
+            id: `copy-err-${Date.now()}`,
+            intent: 'Nothing to copy — no responses yet.',
+            kind: 'session',
+            timestamp: Date.now(),
+          })
+          break
+        }
+        try {
+          const text = lastResponse.fullText || lastResponse.intent
+          execFileSync('pbcopy', [], {
+            input: text,
+            stdio: ['pipe', 'ignore', 'ignore'],
+          })
+          pushEntry({
+            id: `copy-${Date.now()}`,
+            intent: 'Copied last response to clipboard',
+            kind: 'session',
+            timestamp: Date.now(),
+          })
+        } catch {
+          pushEntry({
+            id: `copy-err-${Date.now()}`,
+            intent: 'Failed to copy — clipboard not available',
+            kind: 'session',
+            timestamp: Date.now(),
+            isWarning: true,
+          })
+        }
+        break
+      }
+
+      case 'logout': {
+        if (!client) break
+        try {
+          await client.request('auth/logout', {})
+        } catch {
+          // May not be supported — that's ok
+        }
+        pushEntry({
+          id: `logout-${Date.now()}`,
+          intent: 'Logged out.',
+          kind: 'session',
+          timestamp: Date.now(),
+        })
+        setTimeout(() => exit(), 500)
+        break
+      }
+
+      case 'quit': {
+        exit()
+        break
+      }
+    }
+  }
+
   const submitPrompt = async (promptText: string) => {
     const client = clientRef.current
     if (!client || !threadId) return
     const text = promptText.trim()
     if (!text) return
+
+    // Check for slash commands
+    const parsed = parseSlashCommand(text)
+    if (parsed) {
+      setComposer('')
+      pushEntry({
+        id: `user-${Date.now()}`,
+        intent: text,
+        kind: 'user',
+        timestamp: Date.now(),
+      })
+      setAutoScroll(true)
+      await handleSlashCommand(parsed.command, parsed.args)
+      return
+    }
 
     // Add user message to feed
     pushEntry({
@@ -1352,8 +1688,8 @@ function App() {
   // ── Shortcut help ──
   const helpText =
     entries.length > VIEWPORT_SIZE
-      ? 'Ctrl+U/D scroll · Ctrl+G bottom · Ctrl+C quit'
-      : 'Ctrl+C quit'
+      ? '/help commands · Ctrl+U/D scroll · Ctrl+G bottom · Ctrl+C quit'
+      : '/help commands · Ctrl+C quit'
 
   return (
     <Box flexDirection="column">
