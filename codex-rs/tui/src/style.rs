@@ -31,9 +31,9 @@ pub fn proposed_plan_style_for(terminal_bg: Option<(u8, u8, u8)>) -> Style {
 #[allow(clippy::disallowed_methods)]
 pub fn user_message_bg(terminal_bg: (u8, u8, u8)) -> Color {
     let (top, alpha) = if is_light(terminal_bg) {
-        ((0, 0, 0), 0.04)
+        ((0, 0, 0), 0.08)
     } else {
-        ((255, 255, 255), 0.12)
+        ((255, 255, 255), 0.24)
     };
     best_color(blend(top, terminal_bg, alpha))
 }
