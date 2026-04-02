@@ -28,6 +28,8 @@ pub(crate) const TOOL_CALL_MAX_LINES: usize = 5;
 const USER_SHELL_TOOL_CALL_MAX_LINES: usize = 50;
 const MAX_INTERACTION_PREVIEW_CHARS: usize = 80;
 const SEMANTIC_ITEM_PREVIEW_LIMIT: usize = 3;
+const SHELL_PREVIEW_WORD_LIMIT: usize = 6;
+const SHELL_PREVIEW_GROUP_LIMIT: usize = 3;
 
 pub(crate) struct OutputLinesParams {
     pub(crate) line_limit: usize,
@@ -191,46 +193,90 @@ fn push_semantic_detail_lines(detail: &str, wrap_width: usize, out: &mut Vec<Lin
     }
 }
 
-fn summarize_raw_shell_command(command: &str) -> Option<String> {
-    let trimmed = command.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let step_count = trimmed
+fn shell_steps(command: &str) -> Vec<String> {
+    command
         .lines()
         .flat_map(|line| line.split("&&"))
         .flat_map(|segment| segment.split("||"))
         .flat_map(|segment| segment.split(';'))
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
-        .count();
+        .map(ToString::to_string)
+        .collect()
+}
 
-    if step_count > 1 {
-        return Some(format!("{step_count} shell steps"));
+fn preview_shell_step(step: &str) -> Option<String> {
+    let trimmed = step.trim();
+    if trimmed.is_empty() {
+        return None;
     }
 
-    let head = trimmed.split_whitespace().next()?;
-    let summary = match head {
-        "git" => "git command".to_string(),
-        "rg" | "grep" | "find" | "fd" => "workspace search".to_string(),
-        "ls" | "tree" | "du" => "directory inspection".to_string(),
-        "cat" | "sed" | "head" | "tail" | "awk" => "file inspection".to_string(),
-        "python" | "python3" | "node" | "bash" | "sh" => "script execution".to_string(),
-        "cargo" | "npm" | "pnpm" | "yarn" | "bun" | "go" | "pytest" | "jest" => {
-            "tool invocation".to_string()
-        }
-        other => {
-            let clean = other.trim_matches(|c: char| !c.is_alphanumeric());
-            if clean.is_empty() {
-                "shell command".to_string()
-            } else {
-                format!("{clean} command")
-            }
-        }
-    };
+    let mut tokens = trimmed.split_whitespace();
+    let mut preview = Vec::new();
+    for _ in 0..SHELL_PREVIEW_WORD_LIMIT {
+        let Some(token) = tokens.next() else {
+            break;
+        };
+        preview.push(token);
+    }
 
-    Some(summary)
+    if preview.is_empty() {
+        return None;
+    }
+
+    let has_more = tokens.next().is_some();
+    let mut text = preview.join(" ");
+    if has_more {
+        text.push_str(" …");
+    }
+    Some(text)
+}
+
+fn summarize_shell_steps(command: &str) -> Option<String> {
+    let step_previews: Vec<String> = shell_steps(command)
+        .into_iter()
+        .filter_map(|step| preview_shell_step(&step))
+        .collect();
+
+    if step_previews.is_empty() {
+        return None;
+    }
+
+    let mut grouped: Vec<(String, usize)> = Vec::new();
+    for preview in step_previews {
+        if let Some((existing, count)) = grouped.last_mut()
+            && existing == &preview
+        {
+            *count += 1;
+        } else {
+            grouped.push((preview, 1));
+        }
+    }
+
+    let total_steps: usize = grouped.iter().map(|(_, count)| *count).sum();
+    let hidden_groups = grouped.len().saturating_sub(SHELL_PREVIEW_GROUP_LIMIT);
+
+    let mut parts: Vec<String> = grouped
+        .into_iter()
+        .take(SHELL_PREVIEW_GROUP_LIMIT)
+        .map(|(preview, count)| {
+            if count > 1 {
+                format!("{preview} ×{count}")
+            } else {
+                preview
+            }
+        })
+        .collect();
+
+    if hidden_groups > 0 {
+        parts.push(format!("+{hidden_groups} more"));
+    }
+
+    if total_steps > 1 {
+        parts.push(format!("({total_steps} steps)"));
+    }
+
+    Some(parts.join(" • "))
 }
 
 fn fallback_summary_for_call(call: &ExecCall, raw_command: &str) -> SemanticSummary {
@@ -259,7 +305,7 @@ fn fallback_summary_for_call(call: &ExecCall, raw_command: &str) -> SemanticSumm
         } else {
             "Running shell task".to_string()
         },
-        detail: summarize_raw_shell_command(raw_command),
+        detail: summarize_shell_steps(raw_command).map(|summary| format!("shell tasks: {summary}")),
     }
 }
 
